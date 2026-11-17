@@ -6,6 +6,9 @@
 //    the buffer is zero-padded to the report length.
 //  * Read: a leading 0 report ID is stripped, so data[0] is the first payload byte for
 //    unnumbered reports and the report ID for numbered ones.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include "platform_compat.h"
 
 #ifdef _WIN32

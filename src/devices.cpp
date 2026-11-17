@@ -103,6 +103,7 @@ std::vector<DeviceStatus> PollAllDevices() {
     PollBluetooth(ctx);   // before the generic HID check: Windows' own level wins for the same device
     PollGenericHid(ctx);
     PollXInput(ctx);
+    ApplyBatteryIntelligence(ctx.out);
     return ctx.out;
 }
 
@@ -116,5 +117,6 @@ std::wstring DumpHidCollections() {
     }
     out += report::DumpExtras();  // unopenable HID collections, non-HID USB devices, Bluetooth devices
     out += DumpXentaFrames();
+    out += DumpG435Diagnostics();
     return out;
 }

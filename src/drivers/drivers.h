@@ -78,11 +78,12 @@ void PollMiscMice(PollContext& ctx);  // Motospeed X6, Delux M900 Pro / M800 Pro
 void PollRazerHeadsets(PollContext& ctx);  // BlackShark V2 HyperSpeed / V2 Pro (2020/2023) / V3 variants, Barracuda X (2022)
 void PollFantech(PollContext& ctx);   // Fantech Helios Go XD5 (wired 25A7:FA7B, dongle 25A7:FA7C)
 std::wstring DumpXentaFrames();        // raw Xenta (1D57) status frames, for `--dump`
+std::wstring DumpG435Diagnostics();     // Logitech G435 hardware probe, for `--dump`
 void PollPulsar(PollContext& ctx);    // Pulsar X2 V3 / X2 V3 eS on 3710 (before Kysona, same vendor id)
 void PollAtkBitmouse(PollContext& ctx);  // ATK / VXE NK NANO dongle 373B:1216 (before Kysona, same vendor id)
 void PollKysona(PollContext& ctx);    // also Pulsar, ATK / VXE, Hitscan Hyperlight
 void PollHyperX(PollContext& ctx);
-void PollLogitechG435(PollContext& ctx);  // G435 headset on the 046D:0ADF dongle (not HID++)
+void PollLogitechG435(PollContext& ctx);  // Logitech G435 LIGHTSPEED headset (046D:0ADF Holtek, 4C4A:4155 Jieli)
 void PollAstro(PollContext& ctx);  // A50 X / Gen 5 vendor protocol (before generic Logitech)
 void PollLogitech(PollContext& ctx);
 void PollRazer(PollContext& ctx);

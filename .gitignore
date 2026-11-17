@@ -1,5 +1,6 @@
 build/
 wireless-battery
+build_msvc/
 *.exe
 *.o
 dist/

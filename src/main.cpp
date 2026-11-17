@@ -16,6 +16,7 @@
 #include "devices.h"
 #include "report.h"
 #include "widget.h"
+#include "i18n.h"
 
 namespace {
 
@@ -24,12 +25,18 @@ constexpr UINT WM_RESULTS = WM_APP + 2;
 constexpr UINT WM_WIDGET_CLICK = WM_APP + 3;
 constexpr UINT_PTR TIMER_DEBOUNCE = 1;
 constexpr UINT_PTR TIMER_WIDGET = 2;
-constexpr DWORD POLL_INTERVAL_MS = 60 * 1000;
-constexpr int LOW_BATTERY = 15;
+constexpr UINT_PTR TIMER_CALIBRATE_CLEANUP = 3;
 constexpr UINT PLACEHOLDER_ID = 1;
+constexpr UINT CALIBRATE_NOTIFY_ID = 2;
+
+int g_lowBatteryThreshold = 15;
+DWORD g_pollIntervalMs = 60 * 1000;
 
 enum MenuId : UINT {
     ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_SUPPORT, ID_REPORT,
+    ID_BATTERY_10 = 200, ID_BATTERY_15, ID_BATTERY_20, ID_BATTERY_25,
+    ID_INTERVAL_30S = 210, ID_INTERVAL_60S, ID_INTERVAL_2M, ID_INTERVAL_5M,
+    ID_LANG_AUTO = 220, ID_LANG_PT, ID_LANG_EN,
     ID_MONITOR_ALL = 300, ID_MONITOR_MAIN, ID_MONITOR_FIRST,  // "Show the widget on": ID_MONITOR_FIRST + 0..31
     ID_DEVICE_FIRST = 1000
 };
@@ -59,6 +66,7 @@ struct TrayEntry {
     ULONGLONG lastSeen = 0;
     bool added = false;
     bool lowWarned = false;
+    bool calibratePrompted = false;
     std::wstring iconSig;    // what the current icon shows, to avoid needless redraws
     HICON icon = nullptr;
 };
@@ -179,6 +187,34 @@ void SetWidgetMonitor(const std::wstring& v) {
     widget::SetMonitorChoice(v);
 }
 
+DWORD LoadDwordSetting(const wchar_t* name, DWORD defaultVal) {
+    DWORD v = defaultVal, sz = sizeof(v);
+    RegGetValueW(HKEY_CURRENT_USER, kSettingsKey, name, RRF_RT_REG_DWORD, nullptr, &v, &sz);
+    return v;
+}
+
+void SaveDwordSetting(const wchar_t* name, DWORD val) {
+    RegSetKeyValueW(HKEY_CURRENT_USER, kSettingsKey, name, REG_DWORD, &val, sizeof(val));
+}
+
+int LoadLowBattery() {
+    int v = (int)LoadDwordSetting(L"LowBatteryThreshold", 15);
+    return (v == 10 || v == 15 || v == 20 || v == 25) ? v : 15;
+}
+void SaveLowBattery(int v) { SaveDwordSetting(L"LowBatteryThreshold", (DWORD)v); }
+
+DWORD LoadPollInterval() {
+    DWORD v = LoadDwordSetting(L"PollIntervalMs", 60 * 1000);
+    return (v == 30000 || v == 60000 || v == 120000 || v == 300000) ? v : 60000;
+}
+void SavePollInterval(DWORD v) { SaveDwordSetting(L"PollIntervalMs", v); }
+
+Lang LoadLanguage() {
+    DWORD v = LoadDwordSetting(L"Language", 0);
+    return (v <= 2) ? (Lang)v : Lang::Auto;
+}
+void SaveLanguage(Lang l) { SaveDwordSetting(L"Language", (DWORD)l); }
+
 bool AutostartEnabled() {
     wchar_t buf[MAX_PATH * 2];
     DWORD sz = sizeof(buf);
@@ -298,14 +334,14 @@ HICON RenderIcon(const std::wstring& text, int barPct, Rgb textColor, Rgb barCol
 
 Rgb Foreground() { return g_lightTaskbar ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 }; }
 
-HICON IconFor(int pct, bool charging, bool dim) {
+HICON IconFor(int pct, bool charging, bool dim, bool estimated = false) {
     Rgb fg = Foreground();
-    Rgb bar = charging        ? Rgb{ 0, 170, 255 }
-            : pct <= LOW_BATTERY ? Rgb{ 232, 32, 48 }
-            : pct <= 30       ? Rgb{ 255, 150, 0 }
-                              : Rgb{ 30, 190, 90 };
-    Rgb text = (!charging && pct >= 0 && pct <= LOW_BATTERY) ? Rgb{ 240, 50, 60 } : fg;
-    std::wstring t = pct < 0 ? L"?" : std::to_wstring(pct);
+    Rgb bar = charging                   ? Rgb{ 0, 170, 255 }
+            : pct <= g_lowBatteryThreshold ? Rgb{ 232, 32, 48 }
+            : pct <= 30                  ? Rgb{ 255, 150, 0 }
+                                         : Rgb{ 30, 190, 90 };
+    Rgb text = (!charging && pct >= 0 && pct <= g_lowBatteryThreshold) ? Rgb{ 240, 50, 60 } : fg;
+    std::wstring t = pct < 0 ? L"?" : (estimated ? L"~" + std::to_wstring(pct) : std::to_wstring(pct));
     return RenderIcon(t, pct, text, bar, dim);
 }
 
@@ -318,20 +354,32 @@ void CopyTip(wchar_t* dst, size_t cap, const std::wstring& s) {
 
 std::wstring StatusText(const TrayEntry& e) {
     const auto& s = e.st;
-    if (!s.connected) return L"off / not connected";
+    if (!s.connected) return Tr(StrId::OffNotConnected);
     std::wstring t;
     if (!s.levelText.empty() && s.percent >= 0) t = s.levelText;
-    else if (s.percent >= 0) t = std::to_wstring(s.percent) + L"%";
-    else if (e.lastPct >= 0) t = std::to_wstring(e.lastPct) + L"% (last known)";
-    else t = L"unknown";
-    if (!s.detail.empty() && s.percent >= 0) t += L" (" + s.detail + L")";
-    if (s.charging) t += L", charging";
-    if (s.asleep) t += L", asleep";
+    else if (s.percent >= 0) t = (s.estimated ? L"~" : L"") + std::to_wstring(s.percent) + L"%";
+    else if (e.lastPct >= 0) t = std::to_wstring(e.lastPct) + L"% " + Tr(StrId::LastKnown);
+    else if (!s.detail.empty()) return s.detail;
+    else t = Tr(StrId::Unknown);
+
+    if (s.charging) {
+        t += L" \x26A1";  // ⚡ lightning bolt when Charging is confirmed
+    } else if (!s.asleep && (s.percent >= 0 || e.lastPct >= 0)) {
+        if (s.runtimeMinutes > 0) {
+            t += L" \x00B7 " + FormatRemainingRuntime(s.runtimeMinutes);
+        } else if (s.chargeState != ChargingState::Full) {
+            t += L" \x00B7 " + std::wstring(Tr(StrId::RuntimeUnavailable));
+        }
+    }
+
+    if (!s.detail.empty()) t += L" (" + s.detail + L")";
+    if (s.charging) t += L", " + std::wstring(Tr(StrId::Charging));
+    if (s.asleep) t += L", " + std::wstring(Tr(StrId::Asleep));
     return t;
 }
 
 void TrayCall(DWORD msg, UINT uid, HICON icon, const std::wstring& tip, const wchar_t* infoTitle = nullptr,
-              const std::wstring& info = L"") {
+              const std::wstring& info = L"", DWORD infoFlags = NIIF_WARNING) {
     NOTIFYICONDATAW nid{ sizeof(nid) };
     nid.hWnd = g_hwnd;
     nid.uID = uid;
@@ -343,7 +391,7 @@ void TrayCall(DWORD msg, UINT uid, HICON icon, const std::wstring& tip, const wc
         nid.uFlags |= NIF_INFO;
         CopyTip(nid.szInfoTitle, ARRAYSIZE(nid.szInfoTitle), infoTitle);
         CopyTip(nid.szInfo, ARRAYSIZE(nid.szInfo), info);
-        nid.dwInfoFlags = NIIF_WARNING;
+        nid.dwInfoFlags = infoFlags;
     }
     Shell_NotifyIconW(msg, &nid);
     if (msg == NIM_ADD) {
@@ -368,7 +416,8 @@ void UpdatePlaceholder() {
     for (auto& [k, e] : g_entries) any |= e.added;
     if (!any && !g_placeholder) {
         if (!g_placeholderIcon) g_placeholderIcon = RenderIcon(L"-", -1, Foreground(), Foreground(), true);
-        TrayCall(NIM_ADD, PLACEHOLDER_ID, g_placeholderIcon, L"Wireless Battery\nNo devices with battery info found");
+        std::wstring msg = std::wstring(Tr(StrId::AppName)) + L"\n" + Tr(StrId::NoDevicesFound);
+        TrayCall(NIM_ADD, PLACEHOLDER_ID, g_placeholderIcon, msg);
         g_placeholder = true;
     } else if (any && g_placeholder) {
         TrayDelete(PLACEHOLDER_ID);
@@ -381,27 +430,40 @@ void ApplyEntry(TrayEntry& e) {
     bool visible = s.connected && !g_useWidget && !IsEntryHidden(e);
     if (!visible) {
         if (e.added) { TrayDelete(e.uid); e.added = false; }
+        if (s.connected && g_useWidget && !IsEntryHidden(e) && !s.calibrateMsg.empty() && !e.calibratePrompted) {
+            e.calibratePrompted = true;
+            if (!g_placeholderIcon) g_placeholderIcon = RenderIcon(L"?", -1, Foreground(), Foreground(), true);
+            TrayCall(NIM_ADD, CALIBRATE_NOTIFY_ID, g_placeholderIcon, s.name, Tr(StrId::G435CalibrateTitle), s.calibrateMsg, NIIF_INFO);
+            SetTimer(g_hwnd, TIMER_CALIBRATE_CLEANUP, 8000, nullptr);
+        }
         return;
     }
     int shown = s.percent >= 0 ? s.percent : e.lastPct;
-    bool dim = s.percent < 0;
-    std::wstring sig = std::to_wstring(shown) + (s.charging ? L"c" : L"") + (dim ? L"d" : L"") + (g_lightTaskbar ? L"l" : L"k");
+    bool dim = s.percent < 0 || s.estimated;
+    std::wstring sig = std::to_wstring(shown) + (s.charging ? L"c" : L"") + (dim ? L"d" : L"") +
+                       (s.estimated ? L"e" : L"") + (g_lightTaskbar ? L"l" : L"k");
     if (sig != e.iconSig || !e.icon) {
         if (e.icon) DestroyIcon(e.icon);
-        e.icon = IconFor(shown, s.charging, dim);
+        e.icon = IconFor(shown, s.charging, dim, s.estimated);
         e.iconSig = sig;
     }
     std::wstring tip = s.name + L"\n" + StatusText(e);
 
     const wchar_t* infoTitle = nullptr;
     std::wstring info;
-    if (s.charging || shown > LOW_BATTERY + 10) e.lowWarned = false;
-    if (!s.charging && s.percent >= 0 && s.percent <= LOW_BATTERY && !e.lowWarned) {
+    DWORD infoFlags = NIIF_WARNING;
+    if (s.charging || shown > g_lowBatteryThreshold + 10) e.lowWarned = false;
+    if (!s.charging && s.percent >= 0 && s.percent <= g_lowBatteryThreshold && !e.lowWarned) {
         e.lowWarned = true;
-        infoTitle = L"Low battery";
-        info = s.name + L" is at " + std::to_wstring(s.percent) + L"%";
+        infoTitle = Tr(StrId::LowBattery);
+        info = FormatLowBattery(s.name, s.percent);
+    } else if (!s.calibrateMsg.empty() && !e.calibratePrompted) {
+        e.calibratePrompted = true;
+        infoTitle = Tr(StrId::G435CalibrateTitle);
+        info = s.calibrateMsg;
+        infoFlags = NIIF_INFO;
     }
-    TrayCall(e.added ? NIM_MODIFY : NIM_ADD, e.uid, e.icon, tip, infoTitle, info);
+    TrayCall(e.added ? NIM_MODIFY : NIM_ADD, e.uid, e.icon, tip, infoTitle, info, infoFlags);
     e.added = true;
 }
 
@@ -449,14 +511,14 @@ void UpdateWidget() {
         it.percent = e->st.percent >= 0 ? e->st.percent : e->lastPct;
         if (e->st.percent >= 0) it.text = e->st.levelText;
         it.charging = e->st.charging;
-        it.dim = e->st.percent < 0;
-        it.low = !it.charging && it.percent >= 0 && it.percent <= LOW_BATTERY;
+        it.dim = e->st.percent < 0 || e->st.estimated;
+        it.low = !it.charging && it.percent >= 0 && it.percent <= g_lowBatteryThreshold;
         it.bluetooth = e->st.via == L"Bluetooth";
         items.push_back(it);
         if (!tip.empty()) tip += L"\n";
         tip += e->st.name + L": " + StatusText(*e);
     }
-    if (tip.empty()) tip = L"Wireless Battery: no devices with battery info found";
+    if (tip.empty()) tip = std::wstring(Tr(StrId::AppName)) + L": " + Tr(StrId::NoDevicesFound);
     widget::SetItems(items, tip);
 }
 
@@ -466,7 +528,7 @@ void OnResults(std::vector<DeviceStatus>& results) {
         auto& e = g_entries[s.key];
         if (!e.uid) e.uid = StableId(s.key);
         e.st = s;
-        if (s.percent >= 0) e.lastPct = s.percent;
+        if (s.percent >= 0 && !s.estimated) e.lastPct = s.percent;
         e.lastSeen = GetTickCount64();
         seen[s.key] = true;
         ApplyEntry(e);
@@ -577,7 +639,7 @@ void ShowMenu() {
     HMENU m = CreatePopupMenu();
     std::vector<std::wstring> keys;  // device index -> device key; menu id ID_DEVICE_FIRST + index * DEV_STRIDE + command
     std::vector<TrayEntry*> all = OrderedEntries(false), shown = OrderedEntries(true);
-    if (all.empty()) AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"No devices with battery info found");
+    if (all.empty()) AppendMenuW(m, MF_STRING | MF_GRAYED, 0, Tr(StrId::NoDevicesFound));
     else AppendMenuW(m, MF_STRING | MF_GRAYED, 0, L"Point at a device to show, hide or move it");
     for (TrayEntry* e : all) {
         const std::wstring& k = e->st.key;
@@ -595,13 +657,13 @@ void ShowMenu() {
         AppendMenuW(m, MF_POPUP | (IsHidden(k) ? 0 : MF_CHECKED), (UINT_PTR)sub, line.c_str());
         keys.push_back(k);
     }
-    AppendMenuW(m, MF_STRING | (g_hideLastKnown ? MF_CHECKED : 0), ID_HIDE_LAST_KNOWN, L"Hide last known / asleep devices");
+    AppendMenuW(m, MF_STRING | (g_hideLastKnown ? MF_CHECKED : 0), ID_HIDE_LAST_KNOWN, Tr(StrId::HideLastKnown));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING | (g_wantWidget ? MF_CHECKED : 0), ID_MODE_WIDGET, L"Show on the taskbar (icon + percentage)");
-    AppendMenuW(m, MF_STRING | (!g_wantWidget ? MF_CHECKED : 0), ID_MODE_TRAY, L"Show as tray icons");
+    AppendMenuW(m, MF_STRING | (g_wantWidget ? MF_CHECKED : 0), ID_MODE_WIDGET, Tr(StrId::ModeWidget));
+    AppendMenuW(m, MF_STRING | (!g_wantWidget ? MF_CHECKED : 0), ID_MODE_TRAY, Tr(StrId::ModeTray));
     CheckMenuRadioItem(m, ID_MODE_WIDGET, ID_MODE_TRAY, g_wantWidget ? ID_MODE_WIDGET : ID_MODE_TRAY, MF_BYCOMMAND);
     UINT bgFlags = MF_STRING | (g_widgetBackground ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED);
-    AppendMenuW(m, bgFlags, ID_WIDGET_BACKGROUND, L"Background behind taskbar text (for transparent taskbars)");
+    AppendMenuW(m, bgFlags, ID_WIDGET_BACKGROUND, Tr(StrId::WidgetBackground));
     // With more than one monitor: choose which taskbars show the widget (all, main only, or one monitor).
     auto monitors = widget::OtherMonitors();
     if (monitors.size() > 31) monitors.resize(31);
@@ -624,12 +686,48 @@ void ShowMenu() {
         AppendMenuW(m, MF_POPUP | (g_wantWidget ? 0 : MF_GRAYED), (UINT_PTR)sub, L"Show the widget on");
     }
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, ID_REFRESH, L"Refresh now");
-    AppendMenuW(m, MF_STRING | (AutostartEnabled() ? MF_CHECKED : 0), ID_AUTOSTART, L"Start with Windows");
+
+    // Submenu: Low battery threshold
+    HMENU mBat = CreatePopupMenu();
+    AppendMenuW(mBat, MF_STRING | (g_lowBatteryThreshold == 10 ? MF_CHECKED : 0), ID_BATTERY_10, L"10%");
+    AppendMenuW(mBat, MF_STRING | (g_lowBatteryThreshold == 15 ? MF_CHECKED : 0), ID_BATTERY_15, L"15%");
+    AppendMenuW(mBat, MF_STRING | (g_lowBatteryThreshold == 20 ? MF_CHECKED : 0), ID_BATTERY_20, L"20%");
+    AppendMenuW(mBat, MF_STRING | (g_lowBatteryThreshold == 25 ? MF_CHECKED : 0), ID_BATTERY_25, L"25%");
+    CheckMenuRadioItem(mBat, ID_BATTERY_10, ID_BATTERY_25,
+                       g_lowBatteryThreshold == 10 ? ID_BATTERY_10 :
+                       g_lowBatteryThreshold == 20 ? ID_BATTERY_20 :
+                       g_lowBatteryThreshold == 25 ? ID_BATTERY_25 : ID_BATTERY_15, MF_BYCOMMAND);
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)mBat, Tr(StrId::BatteryAlertSubmenu));
+
+    // Submenu: Poll interval
+    HMENU mPoll = CreatePopupMenu();
+    AppendMenuW(mPoll, MF_STRING | (g_pollIntervalMs == 30000 ? MF_CHECKED : 0), ID_INTERVAL_30S, Tr(StrId::Interval30s));
+    AppendMenuW(mPoll, MF_STRING | (g_pollIntervalMs == 60000 ? MF_CHECKED : 0), ID_INTERVAL_60S, Tr(StrId::Interval60s));
+    AppendMenuW(mPoll, MF_STRING | (g_pollIntervalMs == 120000 ? MF_CHECKED : 0), ID_INTERVAL_2M, Tr(StrId::Interval2m));
+    AppendMenuW(mPoll, MF_STRING | (g_pollIntervalMs == 300000 ? MF_CHECKED : 0), ID_INTERVAL_5M, Tr(StrId::Interval5m));
+    CheckMenuRadioItem(mPoll, ID_INTERVAL_30S, ID_INTERVAL_5M,
+                       g_pollIntervalMs == 30000 ? ID_INTERVAL_30S :
+                       g_pollIntervalMs == 120000 ? ID_INTERVAL_2M :
+                       g_pollIntervalMs == 300000 ? ID_INTERVAL_5M : ID_INTERVAL_60S, MF_BYCOMMAND);
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)mPoll, Tr(StrId::UpdateIntervalSubmenu));
+
+    // Submenu: Language
+    HMENU mLang = CreatePopupMenu();
+    AppendMenuW(mLang, MF_STRING | (g_lang == Lang::Auto ? MF_CHECKED : 0), ID_LANG_AUTO, Tr(StrId::LangAuto));
+    AppendMenuW(mLang, MF_STRING | (g_lang == Lang::PT ? MF_CHECKED : 0), ID_LANG_PT, Tr(StrId::LangPT));
+    AppendMenuW(mLang, MF_STRING | (g_lang == Lang::EN ? MF_CHECKED : 0), ID_LANG_EN, Tr(StrId::LangEN));
+    CheckMenuRadioItem(mLang, ID_LANG_AUTO, ID_LANG_EN,
+                       g_lang == Lang::PT ? ID_LANG_PT :
+                       g_lang == Lang::EN ? ID_LANG_EN : ID_LANG_AUTO, MF_BYCOMMAND);
+    AppendMenuW(m, MF_POPUP, (UINT_PTR)mLang, Tr(StrId::LanguageSubmenu));
+
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+    AppendMenuW(m, MF_STRING, ID_REFRESH, Tr(StrId::RefreshNow));
+    AppendMenuW(m, MF_STRING | (AutostartEnabled() ? MF_CHECKED : 0), ID_AUTOSTART, Tr(StrId::StartWithWindows));
     AppendMenuW(m, MF_STRING, ID_REPORT, L"Request support for a device...");
     AppendMenuW(m, MF_STRING, ID_SUPPORT, L"Support the project...");
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(m, MF_STRING, ID_EXIT, L"Exit");
+    AppendMenuW(m, MF_STRING, ID_EXIT, Tr(StrId::Exit));
     POINT pt;
     GetCursorPos(&pt);
     SetForegroundWindow(g_hwnd);
@@ -647,6 +745,17 @@ void ShowMenu() {
         case ID_MODE_TRAY: SetMode(false); break;
         case ID_SUPPORT: ShellExecuteW(nullptr, L"open", L"https://github.com/sponsors/krisgfx9", nullptr, nullptr, SW_SHOWNORMAL); break;
         case ID_REPORT: report::Show(g_inst, g_hwnd); break;
+        case ID_BATTERY_10: g_lowBatteryThreshold = 10; SaveLowBattery(10); RedrawAll(); UpdateWidget(); break;
+        case ID_BATTERY_15: g_lowBatteryThreshold = 15; SaveLowBattery(15); RedrawAll(); UpdateWidget(); break;
+        case ID_BATTERY_20: g_lowBatteryThreshold = 20; SaveLowBattery(20); RedrawAll(); UpdateWidget(); break;
+        case ID_BATTERY_25: g_lowBatteryThreshold = 25; SaveLowBattery(25); RedrawAll(); UpdateWidget(); break;
+        case ID_INTERVAL_30S: g_pollIntervalMs = 30000; SavePollInterval(30000); SetEvent(g_refreshEvt); break;
+        case ID_INTERVAL_60S: g_pollIntervalMs = 60000; SavePollInterval(60000); SetEvent(g_refreshEvt); break;
+        case ID_INTERVAL_2M: g_pollIntervalMs = 120000; SavePollInterval(120000); SetEvent(g_refreshEvt); break;
+        case ID_INTERVAL_5M: g_pollIntervalMs = 300000; SavePollInterval(300000); SetEvent(g_refreshEvt); break;
+        case ID_LANG_AUTO: g_lang = Lang::Auto; SaveLanguage(Lang::Auto); RedrawAll(); UpdateWidget(); break;
+        case ID_LANG_PT: g_lang = Lang::PT; SaveLanguage(Lang::PT); RedrawAll(); UpdateWidget(); break;
+        case ID_LANG_EN: g_lang = Lang::EN; SaveLanguage(Lang::EN); RedrawAll(); UpdateWidget(); break;
         case ID_EXIT: DestroyWindow(g_hwnd); break;
         default:
             if (cmd >= ID_MONITOR_FIRST && cmd < ID_MONITOR_FIRST + monitors.size()) {
@@ -669,7 +778,7 @@ DWORD WINAPI Worker(LPVOID) {
         auto* v = new std::vector<DeviceStatus>(PollAllDevices());
         if (!PostMessageW(g_hwnd, WM_RESULTS, 0, (LPARAM)v)) delete v;
         HANDLE hs[2] = { g_stopEvt, g_refreshEvt };
-        if (WaitForMultipleObjects(2, hs, FALSE, POLL_INTERVAL_MS) == WAIT_OBJECT_0) return 0;
+        if (WaitForMultipleObjects(2, hs, FALSE, g_pollIntervalMs) == WAIT_OBJECT_0) return 0;
     }
 }
 
@@ -712,6 +821,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
         case WM_TIMER:
             if (wp == TIMER_DEBOUNCE) { KillTimer(h, TIMER_DEBOUNCE); SetEvent(g_refreshEvt); }
             if (wp == TIMER_WIDGET) Reconcile();
+            if (wp == TIMER_CALIBRATE_CLEANUP) { KillTimer(h, TIMER_CALIBRATE_CLEANUP); TrayDelete(CALIBRATE_NOTIFY_ID); }
             return 0;
         case WM_SETTINGCHANGE:
             if (lp && !lstrcmpW((LPCWSTR)lp, L"ImmersiveColorSet")) {
@@ -729,6 +839,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 if (e.icon) DestroyIcon(e.icon);
             }
             if (g_placeholder) TrayDelete(PLACEHOLDER_ID);
+            TrayDelete(CALIBRATE_NOTIFY_ID);
             PostQuitMessage(0);
             return 0;
     }
@@ -781,8 +892,13 @@ int ListToConsole(bool dump) {
         if (!s.connected) line += L"off / not connected";
         else if (s.asleep) line += L"asleep";
         else if (!s.levelText.empty()) line += s.levelText;
-        else if (s.percent >= 0) line += std::to_wstring(s.percent) + L"%";
+        else if (s.percent >= 0) line += (s.estimated ? L"~" : L"") + std::to_wstring(s.percent) + L"%";
         else line += L"unknown";
+        if (s.charging) line += L" \x26A1";
+        else if (s.connected && !s.asleep && s.percent >= 0) {
+            if (s.runtimeMinutes > 0) line += L" \x00B7 " + FormatRemainingRuntime(s.runtimeMinutes);
+            else if (s.chargeState != ChargingState::Full) line += L" \x00B7 " + std::wstring(Tr(StrId::RuntimeUnavailable));
+        }
         if (!s.detail.empty()) line += L" (" + s.detail + L")";
         if (s.charging) line += L", charging";
         if (s.millivolts) line += L", " + std::to_wstring(s.millivolts) + L" mV";
@@ -834,13 +950,16 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     DEV_BROADCAST_DEVICEINTERFACE_W filter{ sizeof(filter) };
     filter.dbcc_devicetype = DBT_DEVTYP_DEVICEINTERFACE;
     filter.dbcc_classguid = GUID_DEVINTERFACE_HID;
-    HDEVNOTIFY notify = RegisterDeviceNotificationW(g_hwnd, &filter, DEVICE_NOTIFY_WINDOW_HANDLE);
+    HDEVNOTIFY notify = RegisterDeviceNotificationW(g_hwnd, &filter, DEVICE_NOTIFY_WINDOW_HANDLE | DEVICE_NOTIFY_ALL_INTERFACE_CLASSES);
 
     g_refreshEvt = CreateEventW(nullptr, FALSE, FALSE, nullptr);
     g_stopEvt = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     g_wantWidget = LoadWidgetMode();
     g_hideLastKnown = LoadHideLastKnown();
     g_widgetBackground = LoadWidgetBackground();
+    g_lowBatteryThreshold = LoadLowBattery();
+    g_pollIntervalMs = LoadPollInterval();
+    g_lang = LoadLanguage();
     widget::SetBackground(g_widgetBackground);  // remembered by the widget across re-creation
     g_widgetMonitor = LoadWidgetMonitor();
     widget::SetMonitorChoice(g_widgetMonitor);
