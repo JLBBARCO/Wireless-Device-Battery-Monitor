@@ -439,6 +439,9 @@ void OnResults(std::vector<DeviceStatus>& results) {
 // widget cannot be created (e.g. Explorer not ready yet). Called once a second.
 void Reconcile() {
     bool alive = g_wantWidget && widget::Alive();
+    // A taskbar that moved between a horizontal edge and a vertical one needs the other layout:
+    // recreate so Create() picks the right one. Both directions switch with no restart.
+    if (alive && widget::TaskbarVertical() != widget::Vertical()) { widget::Destroy(); alive = false; }
     if (g_wantWidget && !alive) alive = widget::Create(g_inst, g_hwnd, WM_WIDGET_CLICK, g_lightTaskbar);
     if (!g_wantWidget) widget::Destroy();
     bool changed = alive != g_useWidget;
