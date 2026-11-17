@@ -2,6 +2,7 @@
 #include "../src/drivers/hidpp_events.h"
 
 #include <cassert>
+#include <optional>
 #include <cstdio>
 #include <vector>
 
@@ -51,19 +52,37 @@ int main() {
     assert(hidpp::ParseNotificationFlags(flagsOff.data(), flagsOff.size(), flags) && !(flags & hidpp::kWirelessNotifications));
     assert(!hidpp::ParseNotificationFlags(on.data(), on.size(), flags));
 
-    // The registered Logitech decoder: wants only the HID++ collections, maps 0x41 to Connection.
+    // EventChannel: plain data, matched against collections and frames.
+    {
+        EventChannel ch;
+        ch.vid = 0x1234;
+        ch.usagePage = 0xFF00;
+        assert(ch.Matches(Coll(0x1234, 0xFF00, 0x0007, 1)));  // empty pid/usage lists match anything
+        assert(!ch.Matches(Coll(0x1234, 0xFF01, 0x0007, 1)));
+        ch.pids = { 0xAAAA };
+        assert(!ch.Matches(Coll(0x1234, 0xFF00, 0x0007, 1)));  // HidColl pid 0 is not listed
+        Bytes any = { 0x05, 0x00 };
+        assert(ch.Accepts(any.data(), any.size()));  // empty report id list accepts any frame
+        ch.reportIds = { 0x07 };
+        assert(!ch.Accepts(any.data(), any.size()));
+        assert(!ch.Accepts(any.data(), 0));
+    }
+
+    // The registered Logitech decoder: only the HID++ receiver collections and reports.
     auto decoders = HidEventDecoders();
-    assert(!decoders.empty());
+    assert(decoders.size() == 1);
     const IHidEventDecoder& d = *decoders[0];
-    assert(d.Wants(Coll(0x046D, 0xFF00, 0x0001, 7)));
-    assert(d.Wants(Coll(0x046D, 0xFF00, 0x0002, 20)));
-    assert(!d.Wants(Coll(0x046D, 0xFF43, 0x0202, 20)));  // headset HID++ (no receiver events)
-    assert(!d.Wants(Coll(0x046D, 0x0001, 0x0002, 8)));   // the mouse itself
-    assert(!d.Wants(Coll(0x1532, 0xFF00, 0x0001, 7)));   // another vendor
-    HidEvent ev = d.Decode(on.data(), on.size());
-    assert(ev.kind == HidEvent::Kind::Connection && ev.what == L"device 2 connected");
-    assert(ev.subject == L"2" && ev.present);
-    assert(d.Decode(battery.data(), battery.size()).kind == HidEvent::Kind::None);
+    const EventChannel& ch = d.Channel();
+    assert(ch.Matches(Coll(0x046D, 0xFF00, 0x0001, 7)));
+    assert(ch.Matches(Coll(0x046D, 0xFF00, 0x0002, 20)));
+    assert(!ch.Matches(Coll(0x046D, 0xFF43, 0x0202, 20)));  // headset HID++ (no receiver events)
+    assert(!ch.Matches(Coll(0x046D, 0x0001, 0x0002, 8)));   // the mouse itself
+    assert(!ch.Matches(Coll(0x1532, 0xFF00, 0x0001, 7)));   // another vendor
+    assert(ch.Accepts(on.data(), on.size()) && !ch.Accepts(mouseInput.data(), mouseInput.size()));
+    std::optional<DeviceSignal> s = d.Decode(on.data(), on.size());
+    assert(s && s->subject == L"2" && s->present == true && s->what == L"device 2 connected");
+    assert(!s->percent && !s->charging);  // a connection hint, not a reading
+    assert(!d.Decode(battery.data(), battery.size()));
 
     // Edges, from the capture on a PRO X 2 DEX (receiver C54D) with openlogi running: openlogi
     // re-announces (flags 0x22) every few seconds; only the real off (0x62) and on (0xA2) count.
@@ -71,9 +90,9 @@ int main() {
         Bytes reannounce = { 0x10, 0x01, 0x41, 0x11, 0x22, 0xB8, 0x40 };
         Bytes realOff = { 0x10, 0x01, 0x41, 0x11, 0x62, 0xB8, 0x40 };
         Bytes realOn = { 0x10, 0x01, 0x41, 0x11, 0xA2, 0xB8, 0x40 };
-        ConnectionEdges edges;
+        SignalEdges edges;
         auto change = [&](const Bytes& b, const wchar_t* path = L"rx1") {
-            return edges.IsChange(path, d.Decode(b.data(), b.size()));
+            return edges.IsChange(path, *d.Decode(b.data(), b.size()));
         };
         assert(change(reannounce));   // first word about device 1: cannot know it is a repeat
         assert(!change(reannounce));  // openlogi again
@@ -82,7 +101,23 @@ int main() {
         assert(change(realOn));       // switched on
         assert(!change(reannounce));
         assert(change(reannounce, L"rx2"));  // the same slot on another receiver is another device
-        assert(!change(battery));            // not an event at all
+    }
+
+    // Edges per field, for decoders whose frames carry a reading (none registered yet).
+    {
+        SignalEdges edges;
+        DeviceSignal r;
+        r.percent = 80;
+        r.charging = false;
+        assert(edges.IsChange(L"dev", r));
+        assert(!edges.IsChange(L"dev", r));  // the same value pushed again
+        r.percent = 79;
+        assert(edges.IsChange(L"dev", r));
+        r.charging = true;
+        assert(edges.IsChange(L"dev", r));
+        DeviceSignal partial;  // a frame that carries only one field leaves the others as known
+        partial.charging = true;
+        assert(!edges.IsChange(L"dev", partial));
     }
 
     std::puts("hid_events_test: ok");

@@ -38,7 +38,7 @@ private:
     void OnReport(const Reader& r, DWORD n);
 
     std::vector<std::unique_ptr<IHidEventDecoder>> decoders_;
-    ConnectionEdges edges_;  // survives Reopen, so a reopened receiver's re-announcement is not news
+    SignalEdges edges_;  // survives Reopen, so a reopened device's first repeat is not news
     Log log_;
     IRefreshSink* sink_ = nullptr;
     HANDLE thread_ = nullptr, stop_ = nullptr, rescan_ = nullptr;

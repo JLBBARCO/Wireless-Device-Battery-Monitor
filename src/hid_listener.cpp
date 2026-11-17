@@ -111,7 +111,7 @@ void HidEventListener::Reopen() {
     CloseAll();
     for (const HidColl& c : EnumHid()) {
         for (const auto& d : decoders_) {
-            if (!d->Wants(c)) continue;
+            if (!d->Channel().Matches(c)) continue;
             if (readers_.size() >= MAXIMUM_WAIT_OBJECTS - 2) return;
             auto r = std::make_unique<Reader>();
             if (r->Open(c, d.get())) {
@@ -128,11 +128,13 @@ void HidEventListener::Reopen() {
 void HidEventListener::CloseAll() { readers_.clear(); }
 
 void HidEventListener::OnReport(const Reader& r, DWORD n) {
-    HidEvent ev = r.decoder->Decode(r.buf.data(), n);
-    bool change = edges_.IsChange(r.coll.path, ev);
+    const BYTE* frame = r.buf.data();
+    std::optional<DeviceSignal> s;
+    if (r.decoder->Channel().Accepts(frame, n)) s = r.decoder->Decode(frame, n);
+    bool change = s && edges_.IsChange(r.coll.path, *s);
     if (log_) {
-        std::wstring what = ev.what.empty() ? L"" : L"  -> " + ev.what + (change ? L"" : L" (repeat, ignored)");
-        log_(Hex4(r.coll.pid) + L"  " + HexReport(r.buf.data(), n) + what);
+        std::wstring what = s ? L"  -> " + s->what + (change ? L"" : L" (repeat, ignored)") : L"";
+        log_(Hex4(r.coll.pid) + L"  " + HexReport(frame, n) + what);
     }
     if (change) sink_->RequestRefresh(RefreshReason::DeviceEvent, r.decoder->SettleMs());
 }
