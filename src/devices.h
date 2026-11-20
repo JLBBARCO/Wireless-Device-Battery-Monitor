@@ -1,8 +1,17 @@
 #pragma once
 #include <string>
 #include <vector>
+#include <cstdint>
 
 enum class DeviceKind { Other, Mouse, Headset, Keyboard, Gamepad, Phone, Microphone };
+
+// A single battery component for multi-battery devices (e.g. Left earbud, Right earbud, Case)
+struct BatteryComponent {
+    std::wstring name;      // e.g. L"Left", L"Right", L"Case"
+    int percent = -1;       // 0..100, or -1 when unknown
+    bool charging = false;
+    bool full = false;
+};
 
 // One battery-powered device, as seen during a single poll.
 struct DeviceStatus {
@@ -20,6 +29,14 @@ struct DeviceStatus {
     int  millivolts = 0;       // battery voltage when reported (0 = unknown)
     int  graceSec   = 0;       // keep showing the last value this long if the device stops answering
     unsigned short vid = 0;    // USB / Bluetooth HID vendor id when known (picks the brand color)
+
+    // Multi-battery support: individual components when reported
+    std::vector<BatteryComponent> batteries;
+
+    // Hardware-reported capacity & battery health (only when validly exposed by hardware)
+    bool hasCapacity = false;
+    uint32_t designCapacityMwh = 0;
+    uint32_t fullChargeCapacityMwh = 0;
 };
 
 // Queries every supported device. Blocking (can take a second or two); call from a worker thread.

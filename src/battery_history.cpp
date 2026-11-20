@@ -599,4 +599,8 @@ void Show(HWND owner, const std::wstring& key, const std::wstring& displayName) 
     SetForegroundWindow(g_view);
     (void)owner; // viewer is independent of the hidden tray message window
 }
+
+const Store& GetStore() {
+    return g_store;
+}
 } // namespace battery_history

@@ -255,6 +255,7 @@ void PollAirPods(PollContext& ctx) {
             s.percent = a.left;
             s.charging = a.leftChg;
             s.via = L"Bluetooth";
+            if (a.left >= 0) s.batteries.push_back({ L"Battery", a.left, a.leftChg, a.left >= 100 && a.leftChg });
         } else {
             // Prefer the lower discharging bud (the one in use); only show charging when every online bud is charging.
             int disLo = -1, chgLo = -1;
@@ -278,6 +279,9 @@ void PollAirPods(PollContext& ctx) {
             }
             s.via = L"Bluetooth \x00B7 L " + Pct(a.left) + (a.leftChg ? L"\x26A1" : L"") + L"  R " + Pct(a.right) +
                     (a.rightChg ? L"\x26A1" : L"") + L"  case " + Pct(a.box) + (a.boxChg ? L"\x26A1" : L"");
+            if (a.left >= 0) s.batteries.push_back({ L"Left", a.left, a.leftChg, a.left >= 100 && a.leftChg });
+            if (a.right >= 0) s.batteries.push_back({ L"Right", a.right, a.rightChg, a.right >= 100 && a.rightChg });
+            if (a.box >= 0) s.batteries.push_back({ L"Case", a.box, a.boxChg, a.box >= 100 && a.boxChg });
         }
         s.graceSec = d.connected ? 300 : 0;
         ctx.out.push_back(s);

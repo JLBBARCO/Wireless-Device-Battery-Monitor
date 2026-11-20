@@ -44,6 +44,14 @@ test: test-update-core test-update-win test-update-signature
 	./build/history_model_test.exe
 	$(CXX) -std=c++17 -O2 -Wall -Wextra tests/runtime_estimate_test.cpp -o build/runtime_estimate_test.exe
 	./build/runtime_estimate_test.exe
+	$(CXX) -std=c++17 -O2 -Wall tests/battery_intelligence_test.cpp src/battery_intelligence.cpp src/i18n.cpp -o build/battery_intelligence_test.exe
+	./build/battery_intelligence_test.exe
+	$(CXX) -std=c++17 -O2 -Wall tests/multi_battery_test.cpp -o build/multi_battery_test.exe
+	./build/multi_battery_test.exe
+	$(CXX) -std=c++17 -O2 -Wall tests/notifications_expansion_test.cpp -o build/notifications_expansion_test.exe
+	./build/notifications_expansion_test.exe
+	$(CXX) -std=c++17 -O2 -Wall tests/dashboard_model_test.cpp src/battery_intelligence.cpp src/i18n.cpp -o build/dashboard_model_test.exe
+	./build/dashboard_model_test.exe
 	$(CXX) $(CXXFLAGS) tests/aula_mouse_driver_test.cpp src/drivers/aula_mouse.cpp -o build/aula_mouse_driver_test.exe
 	./build/aula_mouse_driver_test.exe
 	$(CXX) $(CXXFLAGS) tests/darkrim_driver_test.cpp src/drivers/darkrim.cpp -o build/darkrim_driver_test.exe

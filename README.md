@@ -56,26 +56,40 @@ device key. Renaming never changes driver matching, protocol queries, or `--list
 
 Hover for details. Click for the menu: every device (click one to hide or show it), display mode, *Refresh now*, *Start with Windows*, and *Exit*. Levels refresh every 60 seconds (*Check battery every* in the menu changes this), and right away when a device is plugged in or the PC wakes up.
 
-## Smart Battery Alerts (experimental)
+## Optional Device Dashboard
 
-You can set a **per-device low-battery notification threshold** from each device's
-submenu: **Battery alerts** → *Use default (15%)*, *Disable notifications*,
-or one of 5%, 10%, 15%, 20%, 25%, 30%, 35%, 40%. The existing 15% default stays
-unchanged unless you choose an override. Settings are stored by device key in
-the current user's Windows registry (`Software\WirelessBattery`, `AlertThresholds`).
+BatteryHub includes an optional native Windows dashboard designed for users who want a visual, unified overview without installing heavy vendor suites or browser-based dashboards:
+- **Zero bloat**: built in pure Win32 GDI with zero background services, no Chromium/Electron, and no impact on memory when closed.
+- **Device Overview**: displays compact cards for all connected and previously detected devices, showing connection type, brand accent colors, battery percentage, charging status, sparkline history graphs, and quick drain metrics.
+- **Detailed Device View**: select any device card to view in-depth telemetry including live component levels, 7-day battery history charts, drain rate, estimated remaining runtime, full-charge runtime estimation, battery health (where exposed by hardware), and recent charging sessions.
+- **Multi-Battery Devices**: wireless earbuds and multi-component hardware (e.g. Apple AirPods, Samsung Galaxy Buds, Nothing Ear) display individual Left, Right, and Case percentages with independent charging states.
+- **Battery Consumption Comparison**: compare battery consumption rates across devices of the same category (e.g., mice vs mice, headsets vs headsets) with normalized %/day and runtime metrics.
+- **Charging Session History**: view detailed logs of past charging sessions, including start/end percentages, charge duration, and whether charging completed or was interrupted.
+- **Theming & DPI**: fully native, follows Windows dark/light themes and handles multi-monitor high-DPI scaling automatically.
 
-An alert is triggered only from a real, fresh 0–100% battery reading when the
-device is connected, awake and not charging. An alert is issued once, and will
-re-arm after the level climbs more than 10 percentage points above the chosen
-threshold (or when charging begins). Missing readings or sleeping devices do
-not retrigger alerts. Hidden devices don't produce notifications. Disabling
-notifications for one device does not hide it or change its percentage.
+Open the dashboard anytime by clicking **Device Dashboard...** in the taskbar widget or tray context menu, or right-click any device and choose **View in Dashboard...**.
 
-Both taskbar-widget and tray-icon modes support notifications. Since Windows
-needs a notification-area icon to display a legacy balloon, widget mode may
-show a temporary notification icon for up to one minute after an alert.
-Widget colours and the low-battery highlight still use the project's
-original global 15% threshold, independently of the notification setting.
+## Smart Battery Alerts
+
+Configure per-device low-battery notifications:
+- **Default 20% threshold**: notifies you when a device reaches 20% remaining battery.
+- **Per-device overrides**: choose *Use default (20%)*, *Disable notifications*, or custom levels (5%, 10%, 15%, 20%, 25%, 30%, 35%, 40%) from each device's submenu. Settings are saved in the current user's registry (`Software\WirelessBattery\AlertThresholds`).
+- **Critical & Emergency warnings**: optional alerts at 10% (critical) and 5% (emergency).
+- **Charging complete alert**: notifies when a charging device reaches 100% or signals full charge.
+- **Deduplication**: an alert is issued once per discharge event. Hysteresis ensures it will only re-arm after the battery recovers more than 10 percentage points above the threshold (or when charging starts).
+- **Stale reading protection**: unknown readings, sleeping devices, and temporary link drops never trigger notification spam.
+
+## Battery Intelligence & Local Analytics
+
+BatteryHub calculates battery intelligence locally from observed readings without external cloud dependencies:
+
+- **Battery drain rate**: calculates consumption in percentage per hour (%/hr) and percentage per day (%/day). Accounts for sleep periods, filters out temporary reporting anomalies and sensor noise, and ignores disconnected periods. Shows a clear human-readable projection when sufficient reliable history exists (e.g., *"Your Logitech mouse has lost 18% battery in the last 6 hours. At this rate, approximately 33 hours remain."*).
+- **Full-charge runtime estimation**: estimates how long a device lasts on a full 100% to 0% charge based on observed discharge rates across historical discharge sessions. Displays both the most recent session estimate and historical average runtime.
+- **Battery health tracking**: tracks battery wear and capacity degradation where hardware exposes valid metrics:
+  $$\text{Battery Health (\%)} = \left(\frac{\text{Full Charge Capacity}}{\text{Design Capacity}}\right) \times 100$$
+  *Hardware limitation notice:* Battery health is only computed when hardware exposes valid full-charge and design capacity data (such as Windows.Gaming.Input Xbox controllers). It is never inferred or estimated from ordinary battery percentage readings. For devices that do not expose capacity data, BatteryHub cleanly displays *"Battery health unavailable"*.
+- **Charging session history**: logs start/end battery levels, duration, and completion status locally in `%LOCALAPPDATA%\WirelessBattery\charging_history.tsv`. Writes are debounced and limited to bound disk usage.
+- **Battery consumption comparison**: provides category-normalized comparisons (%/day and runtime). *Note:* comparisons represent percentage drain rates; devices with different battery capacities consume different absolute energy (mWh) per percentage point.
 
 ## Battery history & insights
 

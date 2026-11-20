@@ -1,6 +1,7 @@
 #pragma once
 #include <windows.h>
 #include <string>
+#include "history_model.h"
 
 namespace battery_history {
 // Called once before polling starts. Demo data is ephemeral and never written to disk.
@@ -9,4 +10,6 @@ void Initialize(bool demo);
 void Observe(const std::wstring& key, int percent, bool charging);
 // Non-modal native Win32 history viewer; device identity remains the original key.
 void Show(HWND owner, const std::wstring& key, const std::wstring& displayName);
+// Returns the in-memory sample store
+const Store& GetStore();
 } // namespace battery_history

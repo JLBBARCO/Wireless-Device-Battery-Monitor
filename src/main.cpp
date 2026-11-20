@@ -19,6 +19,8 @@
 #include "alert_rules.h"
 #include "devices.h"
 #include "battery_history.h"
+#include "battery_intelligence.h"
+#include "dashboard.h"
 #include "i18n.h"
 #include "json_output.h"
 #include "labels.h"
@@ -27,6 +29,7 @@
 #include "widget.h"
 #include "update_win.h"
 #include "update_apply.h"
+#include <ctime>
 
 namespace {
 
@@ -39,13 +42,13 @@ constexpr UINT_PTR TIMER_ALERT_ICON = 3;
 // "Check battery every" choices in seconds; 60 is the default. A poll resets an awake device's sleep timer,
 // so a device only sleeps if its timer is shorter than the interval.
 constexpr DWORD POLL_SECONDS[] = { 30, 60, 120, 300, 600, 900, 1800, 3600 };
-constexpr int LOW_BATTERY = 15;
+constexpr int LOW_BATTERY = 20;
 constexpr UINT PLACEHOLDER_ID = 1;
 constexpr UINT ALERT_ICON_ID = 2;
 
 enum MenuId : UINT {
     ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_SUPPORT, ID_REPORT,
-    ID_BRAND_COLORS, ID_STACKED, ID_SHOW_DISCONNECTED, ID_RECORD_HISTORY,
+    ID_BRAND_COLORS, ID_STACKED, ID_SHOW_DISCONNECTED, ID_RECORD_HISTORY, ID_DASHBOARD = 150,
     ID_POLL_FIRST = 500,  // "Check battery every": ID_POLL_FIRST + 0..7
     ID_UPDATE = 200, ID_AUTO_UPDATE,
     ID_LANG_AUTO = 400, ID_LANG_ADD, ID_LANG_FIRST,  // "Language": ID_LANG_FIRST + 0..63
@@ -54,7 +57,8 @@ enum MenuId : UINT {
 };
 enum DeviceCmd : UINT {
     DEV_TOGGLE, DEV_LEFT, DEV_RIGHT, DEV_RENAME, DEV_RESET_NAME, DEV_HISTORY,
-    DEV_ALERT_FIRST = 6, DEV_ALERT_DEFAULT = DEV_ALERT_FIRST + 8, DEV_ALERT_OFF, DEV_STRIDE = 16
+    DEV_ALERT_FIRST = 6, DEV_ALERT_DEFAULT = DEV_ALERT_FIRST + 8, DEV_ALERT_OFF,
+    DEV_DASHBOARD = 16, DEV_STRIDE = 32
 };
 
 const wchar_t* kAppName = L"BatteryHub";
@@ -90,7 +94,7 @@ struct TrayEntry {
     HICON icon = nullptr;
 };
 std::map<std::wstring, TrayEntry> g_entries;
-std::map<std::wstring, bool> g_alertLatches;  // survive transient removal of a device
+std::map<std::wstring, alerts::DeviceAlertState> g_alertStates;  // survive transient removal of a device
 bool g_alertIconAdded = false;  // short-lived tray icon for widget-mode notifications
 bool g_placeholder = false;
 HICON g_placeholderIcon = nullptr;
@@ -478,10 +482,34 @@ void TrayDelete(UINT uid) {
     Shell_NotifyIconW(NIM_DELETE, &nid);
 }
 
-void ShowBatteryAlert(TrayEntry& e) {
-    const std::wstring title = T(L"Low battery");
-    const std::wstring message = TF(L"{name} is at {percent}%",
-                                   { { L"name", DisplayName(e) }, { L"percent", std::to_wstring(e.st.percent) } });
+void ShowBatteryAlert(TrayEntry& e, alerts::AlertType type = alerts::AlertType::LowBattery) {
+    std::wstring title;
+    std::wstring message;
+    switch (type) {
+        case alerts::AlertType::EmergencyBattery:
+            title = T(L"Emergency battery");
+            message = TF(L"{name} is critically low at {percent}%! Charge immediately.",
+                         { { L"name", DisplayName(e) }, { L"percent", std::to_wstring(e.st.percent) } });
+            break;
+        case alerts::AlertType::CriticalBattery:
+            title = T(L"Critical battery warning");
+            message = TF(L"{name} is at {percent}% battery.",
+                         { { L"name", DisplayName(e) }, { L"percent", std::to_wstring(e.st.percent) } });
+            break;
+        case alerts::AlertType::ChargingComplete:
+            title = T(L"Charging completed");
+            message = TF(L"{name} is fully charged.", { { L"name", DisplayName(e) } });
+            break;
+        case alerts::AlertType::Disconnected:
+            title = T(L"Device disconnected");
+            message = TF(L"{name} disconnected.", { { L"name", DisplayName(e) } });
+            break;
+        default:
+            title = T(L"Low battery");
+            message = TF(L"{name} is running low on battery — {percent}% remaining.",
+                         { { L"name", DisplayName(e) }, { L"percent", std::to_wstring(e.st.percent) } });
+            break;
+    }
     if (!g_useWidget && e.added) {
         TrayCall(NIM_MODIFY, e.uid, e.icon, DisplayName(e) + L"\n" + StatusText(e), title.c_str(), message);
         return;
@@ -606,6 +634,7 @@ void UpdateWidget() {
 
 void OnResults(std::vector<DeviceStatus>& results) {
     std::map<std::wstring, bool> seen;
+    int64_t now = static_cast<int64_t>(std::time(nullptr));
     for (auto& s : results) {
         auto& e = g_entries[s.key];
         if (!e.uid) e.uid = StableId(s.key);
@@ -613,18 +642,22 @@ void OnResults(std::vector<DeviceStatus>& results) {
         if (s.percent >= 0) e.lastPct = s.percent;
         e.lastSeen = GetTickCount64();
         seen[s.key] = true;
-        // Evaluate even in widget mode: ApplyEntry only manages tray icons.
-        // Alert latches are kept by stable device key even if the driver briefly stops reporting it.
-        if (const auto it = g_alertLatches.find(s.key); it != g_alertLatches.end())
-            e.lowWarned = it->second;
-        bool notify = !IsHidden(s.key) &&
-                      alerts::ShouldNotify(s, alerts::EffectiveThreshold(g_alertOverrides, s.key), e.lowWarned);
-        g_alertLatches[s.key] = e.lowWarned;
-        if (g_alertLatches.size() > 256) g_alertLatches.erase(g_alertLatches.begin());
+
+        battery_intelligence::ObserveDevice(s, now);
+
+        auto& ast = g_alertStates[s.key];
+        alerts::AlertType alert = alerts::AlertType::None;
+        if (!IsHidden(s.key)) {
+            int threshold = alerts::EffectiveThreshold(g_alertOverrides, s.key);
+            alert = alerts::EvaluateDeviceAlert(s, threshold, ast);
+            e.lowWarned = ast.lowWarned;
+        }
+        if (g_alertStates.size() > 256) g_alertStates.erase(g_alertStates.begin());
+
         if (g_recordHistory && s.connected && !s.asleep && s.percent >= 0)
             battery_history::Observe(s.key, s.percent, s.charging);
         ApplyEntry(e);
-        if (notify) ShowBatteryAlert(e);
+        if (alert != alerts::AlertType::None) ShowBatteryAlert(e, alert);
     }
     for (auto it = g_entries.begin(); it != g_entries.end();) {
         auto& e = it->second;
@@ -648,6 +681,7 @@ void OnResults(std::vector<DeviceStatus>& results) {
     }
     UpdatePlaceholder();
     UpdateWidget();
+    dashboard::UpdateDevices(results, battery_history::GetStore());
 }
 
 // Makes the actual display match the chosen mode; falls back to tray icons if the taskbar
@@ -783,7 +817,7 @@ void SetAlertOverride(const std::wstring& key, int threshold) {
     else if (alerts::ValidOverride(threshold)) g_alertOverrides[key] = threshold;
     else return;
     SaveAlertThresholds();
-    g_alertLatches.erase(key);
+    g_alertStates.erase(key);
     auto it = g_entries.find(key);
     if (it != g_entries.end()) it->second.lowWarned = false;
     SetEvent(g_refreshEvt);  // reconsider with a fresh reading; never alert from stale data
@@ -809,6 +843,8 @@ void MoveEntry(const std::wstring& key, int dir) {
 void ShowMenu() {
     ApplyMenuTheme(g_lightTaskbar);
     HMENU m = CreatePopupMenu();
+    AppendMenuW(m, MF_STRING, ID_DASHBOARD, T(L"Device Dashboard..."));
+    AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     std::vector<std::wstring> keys;  // device index -> device key; menu id ID_DEVICE_FIRST + index * DEV_STRIDE + command
     std::vector<TrayEntry*> all = OrderedEntries(false), shown = OrderedEntries(true);
     if (all.empty()) AppendMenuW(m, MF_STRING | MF_GRAYED, 0, T(L"No devices with battery info found"));
@@ -832,7 +868,7 @@ void ShowMenu() {
         HMENU alertMenu = CreatePopupMenu();
         int selectedThreshold = alerts::OverrideFor(g_alertOverrides, k);
         AppendMenuW(alertMenu, MF_STRING | (selectedThreshold == alerts::kUseDefault ? MF_CHECKED : 0),
-                    base + DEV_ALERT_DEFAULT, T(L"Use default (15%)"));
+                    base + DEV_ALERT_DEFAULT, T(L"Use default (20%)"));
         AppendMenuW(alertMenu, MF_STRING | (selectedThreshold == alerts::kDisabled ? MF_CHECKED : 0),
                     base + DEV_ALERT_OFF, T(L"Disable notifications"));
         AppendMenuW(alertMenu, MF_SEPARATOR, 0, nullptr);
@@ -843,6 +879,7 @@ void ShowMenu() {
                         base + DEV_ALERT_FIRST + i, label.c_str());
         }
         AppendMenuW(sub, MF_POPUP, (UINT_PTR)alertMenu, T(L"Battery alerts"));
+        AppendMenuW(sub, MF_STRING, base + DEV_DASHBOARD, T(L"View in Dashboard..."));
         AppendMenuW(sub, MF_STRING, base + DEV_HISTORY, T(L"Battery history..."));
         std::wstring line = DisplayName(*e) + L":  " + StatusText(*e) + L"   [" + T(e->st.via) + L"]";
         AppendMenuW(m, MF_POPUP | (IsHidden(k) ? 0 : MF_CHECKED), (UINT_PTR)sub, line.c_str());
@@ -932,6 +969,7 @@ void ShowMenu() {
     PostMessageW(g_hwnd, WM_NULL, 0, 0);
     DestroyMenu(m);
     switch (cmd) {
+        case ID_DASHBOARD: dashboard::Show(g_hwnd); break;
         case ID_REFRESH: SetEvent(g_refreshEvt); break;
         case ID_AUTOSTART: SetAutostart(!AutostartEnabled()); break;
         case ID_HIDE_LAST_KNOWN: SetHideLastKnown(!g_hideLastKnown); break;
@@ -968,6 +1006,7 @@ void ShowMenu() {
                     case DEV_RESET_NAME: ResetDeviceName(key); break;
                     case DEV_ALERT_DEFAULT: SetAlertOverride(key, alerts::kUseDefault); break;
                     case DEV_ALERT_OFF: SetAlertOverride(key, alerts::kDisabled); break;
+                    case DEV_DASHBOARD: dashboard::Show(g_hwnd); dashboard::SelectDevice(key); break;
                     case DEV_HISTORY: {
                         auto it = g_entries.find(key);
                         if (it != g_entries.end())
@@ -1026,6 +1065,23 @@ std::vector<DeviceStatus> DemoDevices() {
     offline.via = L"2.4 GHz receiver";
     offline.connected = false;
     devices.push_back(offline);  // hidden by default, shown when the opt-in setting is enabled
+
+    for (auto& s : devices) {
+        if (s.key == L"airpods:demo") {
+            s.batteries = {
+                { L"Left", 85, false, false },
+                { L"Right", 78, false, false },
+                { L"Case", 62, true, false }
+            };
+            s.detail = L"L 85%, R 78%, case 62% ⚡";
+        }
+        if (s.key == L"xbox:demo") {
+            s.hasCapacity = true;
+            s.designCapacityMwh = 3000;
+            s.fullChargeCapacityMwh = 2850;
+        }
+    }
+
     return devices;
 }
 
@@ -1280,6 +1336,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     LoadAliases();
     LoadAlertThresholds();
     battery_history::Initialize(g_demo);
+    battery_intelligence::Initialize(g_demo);
     Reconcile();
     UpdatePlaceholder();  // something to click on until the first poll finishes
     SetTimer(g_hwnd, TIMER_WIDGET, 1000, nullptr);
@@ -1295,6 +1352,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     while (PeekMessageW(&m, nullptr, WM_RESULTS, WM_RESULTS, PM_REMOVE)) delete reinterpret_cast<std::vector<DeviceStatus>*>(m.lParam);
     if (notify) UnregisterDeviceNotification(notify);
     if (g_worker) CloseHandle(g_worker);
+    dashboard::Close();
+    battery_intelligence::Shutdown();
     ReleaseMutex(mutex);
     return 0;
 }
