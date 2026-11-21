@@ -39,11 +39,7 @@ int HidDev::SetOutputAndRead(const std::vector<BYTE>& q, std::vector<BYTE>& r, i
     };
     assert(c_.pid == 0x6425);
     assert(ajazzCommandIndex < (int)commands.size());
-    assert(q.size() == 64);
-    for (size_t i = 0; i < commands[ajazzCommandIndex].size(); ++i)
-        assert(q[i] == commands[ajazzCommandIndex][i]);
-    for (size_t i = commands[ajazzCommandIndex].size(); i < q.size(); ++i)
-        assert(q[i] == 0);
+    assert(q == commands[ajazzCommandIndex]);
     ++ajazzCommandIndex;
     assert(ms == 250);
     r.assign(64, 0);
