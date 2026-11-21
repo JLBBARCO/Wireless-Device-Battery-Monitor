@@ -1,12 +1,12 @@
-// Press Play ICARUS V2 Nearlink (7768:6434) and an EXPERIMENTAL probe for
-// AJAZZ AJ159NL P NearLink (7768:6425).
-//
-// The 06 05 query and [06 05 26 ... battery%] reply are documented for ICARUS V2.
-// AJAZZ exposes the same FFB2:0001 64-byte HID collection, but its command/reply
-// protocol has NOT yet been confirmed on hardware. For AJAZZ we therefore send
-// only this read-only battery query and accept a result only if the complete
-// ICARUS reply signature is present. A non-matching response is ignored.
+// Press Play ICARUS V2 Nearlink (7768:6434) and AJAZZ AJ159NL P NearLink (7768:6425).
+// ICARUS uses its own documented 06 05 / 06 05 26 battery reply.
+// AJAZZ uses the receiver's 06 FA status input report: byte 6 is percent and byte 7 is
+// the charging flag. Its setup exchange mirrors the official AJAZZ app's read-only
+// output reports captured on HID interface 1 (FFB2:0001).
 #include "drivers.h"
+
+#include <map>
+#include <memory>
 
 namespace {
 
@@ -17,52 +17,153 @@ constexpr USHORT kUsagePage = 0xFFB2;
 constexpr USHORT kUsage = 0x0001;
 constexpr size_t kReportLength = 64;
 constexpr BYTE kReportId = 0x06;
-constexpr BYTE kBatteryCommand = 0x05;
-constexpr BYTE kReplyMarker = 0x26;
-constexpr size_t kPercentOffset = 13;
 
-bool QueryBattery(const HidColl& c, int& percent) {
+// Press Play ICARUS V2 protocol.
+constexpr BYTE kIcarusBatteryCommand = 0x05;
+constexpr BYTE kIcarusReplyMarker = 0x26;
+constexpr size_t kIcarusPercentOffset = 13;
+
+bool QueryIcarusBattery(const HidColl& c, int& percent) {
     HidDev d;
     if (!d.Open(c)) return false;
     d.Flush();
 
     std::vector<BYTE> request(c.outLen(), 0), reply;
     request[0] = kReportId;
-    request[1] = kBatteryCommand;
+    request[1] = kIcarusBatteryCommand;
     int n = d.SetOutputAndRead(request, reply, 500);
-    if (n < (int)(kPercentOffset + 1) || reply.size() < kPercentOffset + 1 || reply[0] != kReportId ||
-        reply[1] != kBatteryCommand || reply[2] != kReplyMarker || reply[kPercentOffset] > 100)
+    if (n < (int)(kIcarusPercentOffset + 1) || reply.size() < kIcarusPercentOffset + 1 ||
+        reply[0] != kReportId || reply[1] != kIcarusBatteryCommand ||
+        reply[2] != kIcarusReplyMarker || reply[kIcarusPercentOffset] > 100)
         return false;
 
-    percent = reply[kPercentOffset];
+    percent = reply[kIcarusPercentOffset];
     return true;
 }
 
-void PollNearlinkProduct(PollContext& ctx, USHORT pid, const wchar_t* key, const wchar_t* name) {
-    if (ctx.IsClaimed(kVid, pid)) return;
-    for (const HidColl* c : ctx.Find(kVid, pid, [](const HidColl& c) {
+void PollIcarus(PollContext& ctx) {
+    if (ctx.IsClaimed(kVid, kIcarusPid)) return;
+    for (const HidColl* c : ctx.Find(kVid, kIcarusPid, [](const HidColl& c) {
              return c.page() == kUsagePage && c.usage() == kUsage && c.inLen() == kReportLength &&
                     c.outLen() == kReportLength;
          })) {
         int percent = -1;
-        if (!QueryBattery(*c, percent)) continue;
+        if (!QueryIcarusBattery(*c, percent)) continue;
 
         DeviceStatus s;
-        s.key = key;
-        s.name = name;
+        s.key = L"pressplay:icarus-v2";
+        s.name = L"Press Play ICARUS V2 Nearlink";
         s.kind = DeviceKind::Mouse;
         s.via = L"2.4 GHz receiver";
         s.percent = percent;
-        ctx.Add(s, kVid, pid);
+        ctx.Add(s, kVid, kIcarusPid);
         break;
+    }
+}
+
+// The official AJAZZ app sends this read-only initialization/status sequence to report ID 6.
+// Each command is padded to the 64-byte output-report length by HidDev.
+const std::vector<std::vector<BYTE>>& AjazzStartupCommands() {
+    static const std::vector<std::vector<BYTE>> commands = {
+        { 0x06, 0x05 },
+        { 0x06, 0x05 },
+        { 0x06, 0x07 },
+        { 0x06, 0x11 },
+        { 0x06, 0x31, 0x3B },
+        { 0x06, 0x31, 0x05, 0x3B },
+    };
+    return commands;
+}
+
+bool DecodeAjazzStatus(const std::vector<BYTE>& report, int& percent, bool& charging) {
+    // Captured AJAZZ NearLink input report:
+    // 06 FA 03 00 00 03 [percent 0..100] [charging 0|1] ...
+    if (report.size() < 8 || report[0] != 0x06 || report[1] != 0xFA ||
+        report[2] != 0x03 || report[5] != 0x03 || report[6] > 100 || report[7] > 1)
+        return false;
+    percent = report[6];
+    charging = report[7] != 0;
+    return true;
+}
+
+struct AjazzSession {
+    std::unique_ptr<HidDev> device;
+    int percent = -1;
+    bool charging = false;
+};
+
+// Keep the receiver handle open between BatteryHub polls so input status reports can queue
+// between refreshes (the AJAZZ app also keeps its HID collection open).
+std::map<std::wstring, AjazzSession> g_ajazzSessions;
+
+void PollAjazzNearlink(PollContext& ctx) {
+    if (ctx.IsClaimed(kVid, kAjazzPid)) return;
+
+    std::set<std::wstring> present;
+    for (const HidColl* c : ctx.Find(kVid, kAjazzPid, [](const HidColl& c) {
+             return c.iface == 1 && c.page() == kUsagePage && c.usage() == kUsage &&
+                    c.inLen() == kReportLength && c.outLen() == kReportLength;
+         })) {
+        present.insert(c->path);
+        AjazzSession& session = g_ajazzSessions[c->path];
+        if (!session.device) {
+            session.device = std::make_unique<HidDev>();
+            if (!session.device->Open(*c)) {
+                g_ajazzSessions.erase(c->path);
+                continue;
+            }
+            session.device->Flush();
+        }
+
+        auto accept = [&](const std::vector<BYTE>& report) {
+            int percent = -1;
+            bool charging = false;
+            if (!DecodeAjazzStatus(report, percent, charging)) return false;
+            session.percent = percent;
+            session.charging = charging;
+            return true;
+        };
+
+        // Reproduce the app's observed, read-only setup sequence. SetOutputAndRead arms an
+        // input read before issuing each HID SET_REPORT, matching the captured control transfers.
+        for (const auto& command : AjazzStartupCommands()) {
+            std::vector<BYTE> reply;
+            if (session.device->SetOutputAndRead(command, reply, 250) > 0)
+                accept(reply);
+        }
+
+        // The battery/charging status is a separate 06 FA input report, not the 06 05/07/11/31
+        // command echo. It may arrive just after the setup exchange or be queued after a state
+        // change, so listen briefly and retain the last valid reading between polls.
+        for (int i = 0; i < 6; ++i) {
+            std::vector<BYTE> report;
+            int n = session.device->Read(report, i == 0 ? 1500 : 50);
+            if (n < 0) break;
+            accept(report);
+        }
+
+        if (session.percent >= 0) {
+            DeviceStatus s;
+            s.key = L"ajazz:aj159nlp-nearlink";
+            s.name = L"AJAZZ AJ159NL P";
+            s.kind = DeviceKind::Mouse;
+            s.via = L"2.4 GHz receiver";
+            s.percent = session.percent;
+            s.charging = session.charging;
+            s.graceSec = 1800;
+            ctx.Add(s, kVid, kAjazzPid);
+            break;
+        }
+    }
+
+    for (auto it = g_ajazzSessions.begin(); it != g_ajazzSessions.end();) {
+        it = present.count(it->first) ? std::next(it) : g_ajazzSessions.erase(it);
     }
 }
 
 }  // namespace
 
 void PollPressPlayIcarus(PollContext& ctx) {
-    PollNearlinkProduct(ctx, kIcarusPid, L"pressplay:icarus-v2", L"Press Play ICARUS V2 Nearlink");
-    // Experimental only: AJAZZ VID:PID and HID report sizes match, but the
-    // ICARUS battery command has not yet been verified against this receiver.
-    PollNearlinkProduct(ctx, kAjazzPid, L"ajazz:aj159nlp-nearlink", L"AJAZZ AJ159NL P");
+    PollIcarus(ctx);
+    PollAjazzNearlink(ctx);
 }
