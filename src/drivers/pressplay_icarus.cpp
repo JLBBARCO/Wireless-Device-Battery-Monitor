@@ -1,15 +1,18 @@
-// Press Play ICARUS V2 Nearlink on its 2.4 GHz receiver (7768:6434).
-// Protocol observed from Press Play's web hub (https://hub.pressplayid.com/) in USBPcap captures
-// from this device at 100% and 90% battery. On vendor collection FFB2:0001 (64-byte input/output),
-// send output report 06 05 followed by zeroes. The receiver answers on the input report with
-// [0] = 06, [1] = 05, [2] = 26; [13] is the battery percent (0x64 at 100%, 0x5A at 90%).
-// The other observed configuration commands are intentionally not sent.
+// Press Play ICARUS V2 Nearlink (7768:6434) and an EXPERIMENTAL probe for
+// AJAZZ AJ159NL P NearLink (7768:6425).
+//
+// The 06 05 query and [06 05 26 ... battery%] reply are documented for ICARUS V2.
+// AJAZZ exposes the same FFB2:0001 64-byte HID collection, but its command/reply
+// protocol has NOT yet been confirmed on hardware. For AJAZZ we therefore send
+// only this read-only battery query and accept a result only if the complete
+// ICARUS reply signature is present. A non-matching response is ignored.
 #include "drivers.h"
 
 namespace {
 
 constexpr USHORT kVid = 0x7768;
-constexpr USHORT kPid = 0x6434;
+constexpr USHORT kIcarusPid = 0x6434;
+constexpr USHORT kAjazzPid = 0x6425;
 constexpr USHORT kUsagePage = 0xFFB2;
 constexpr USHORT kUsage = 0x0001;
 constexpr size_t kReportLength = 64;
@@ -35,11 +38,9 @@ bool QueryBattery(const HidColl& c, int& percent) {
     return true;
 }
 
-}  // namespace
-
-void PollPressPlayIcarus(PollContext& ctx) {
-    if (ctx.IsClaimed(kVid, kPid)) return;
-    for (const HidColl* c : ctx.Find(kVid, kPid, [](const HidColl& c) {
+void PollNearlinkProduct(PollContext& ctx, USHORT pid, const wchar_t* key, const wchar_t* name) {
+    if (ctx.IsClaimed(kVid, pid)) return;
+    for (const HidColl* c : ctx.Find(kVid, pid, [](const HidColl& c) {
              return c.page() == kUsagePage && c.usage() == kUsage && c.inLen() == kReportLength &&
                     c.outLen() == kReportLength;
          })) {
@@ -47,12 +48,21 @@ void PollPressPlayIcarus(PollContext& ctx) {
         if (!QueryBattery(*c, percent)) continue;
 
         DeviceStatus s;
-        s.key = L"pressplay:icarus-v2";
-        s.name = L"Press Play ICARUS V2 Nearlink";
+        s.key = key;
+        s.name = name;
         s.kind = DeviceKind::Mouse;
         s.via = L"2.4 GHz receiver";
         s.percent = percent;
-        ctx.Add(s, kVid, kPid);
+        ctx.Add(s, kVid, pid);
         break;
     }
+}
+
+}  // namespace
+
+void PollPressPlayIcarus(PollContext& ctx) {
+    PollNearlinkProduct(ctx, kIcarusPid, L"pressplay:icarus-v2", L"Press Play ICARUS V2 Nearlink");
+    // Experimental only: AJAZZ VID:PID and HID report sizes match, but the
+    // ICARUS battery command has not yet been verified against this receiver.
+    PollNearlinkProduct(ctx, kAjazzPid, L"ajazz:aj159nlp-nearlink", L"AJAZZ AJ159NL P");
 }
