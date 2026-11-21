@@ -34,7 +34,7 @@ build/app_res.o: res/app.rc res/app.manifest res/app.ico res/app_light.ico res/f
 clean:
 	rm -rf build BatteryHub.exe
 
-test: test-update-core test-update-win test-update-signature
+test: test-update-core test-update-win test-update-signature test-sonix
 	@mkdir -p build
 	$(CXX) -std=c++17 -O2 -Wall tests/device_aliases_test.cpp -o build/device_aliases_test.exe
 	./build/device_aliases_test.exe
@@ -173,6 +173,11 @@ test: test-update-core test-update-win test-update-signature
 	$(CXX) -std=c++17 -O2 -Wall -Wextra tests/fastpair_stream_test.cpp -o build/fastpair_stream_test.exe
 	./build/fastpair_stream_test.exe
 
+test-sonix:
+	@mkdir -p build
+	$(CXX) $(CXXFLAGS) tests/sonix_driver_test.cpp -o build/sonix_driver_test.exe
+	./build/sonix_driver_test.exe
+
 test-update-core:
 	@mkdir -p build
 	$(CXX) -std=c++17 -O2 -Wall tests/update_core_test.cpp src/update_core.cpp -o build/update_core_test.exe
@@ -191,4 +196,4 @@ test-update-win: build/version.h build/app_res.o
 
 FORCE:
 
-.PHONY: clean test test-update-core test-update-win test-update-signature FORCE
+.PHONY: clean test test-sonix test-update-core test-update-win test-update-signature FORCE

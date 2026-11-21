@@ -11,6 +11,7 @@
 off / not connected = 
 {percent}% (last known) = 
 unknown = 
+Battery unavailable =
 charging = 
 fully charged = 
 asleep = 

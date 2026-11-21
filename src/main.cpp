@@ -1039,7 +1039,7 @@ void OnResults(std::vector<DeviceStatus>& results) {
         if (!e.uid) e.uid = StableId(s.key);
         const int previousPercent = e.st.connected && !e.st.asleep ? e.st.percent : -1;  // the last fresh reading
         e.st = s;
-        if (s.percent >= 0) e.lastPct = s.percent;
+        e.lastPct = RememberedPercent(s, e.lastPct);
         if (reading_freshness::Confirmed(s.percent, s.connected, s.asleep)) e.lastReadingTick = GetTickCount64();
         e.lastSeen = GetTickCount64();
         seen[s.key] = true;

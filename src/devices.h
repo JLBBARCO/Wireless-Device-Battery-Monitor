@@ -22,7 +22,13 @@ struct DeviceStatus {
     int  graceSec   = 0;       // keep showing the last value this long if the device stops answering
     unsigned short vid = 0;    // USB / Bluetooth HID vendor id when known (picks the brand color)
     bool unsupported = false;  // seen but no driver reads its battery: listed in the menu only (PR #2463)
+    bool retainLastPercent = true;  // allow a previous reading while this poll's percentage is unknown
 };
+
+inline int RememberedPercent(const DeviceStatus& status, int previous) {
+    if (status.percent >= 0) return status.percent;
+    return status.retainLastPercent ? previous : -1;
+}
 
 // Queries every supported device. Blocking (can take a second or two); call from a worker thread.
 std::vector<DeviceStatus> PollAllDevices();

@@ -16,6 +16,10 @@
 // From github.com/donglover69/sonix-keyboard-studio (README, "2.4G dongles"); the AK820 Pro receiver
 // 0C45:FDFD and the echo match from github.com/deddroid/ak820-rs (src/device.rs, src/protocol.rs) and
 // github.com/usharik/ak820-studio (Sources/AK820Kit/Keyboard.swift).
+// Lofree Flow2 84 (OE927), receiver 388D:0002: experimental custom firmware LF2-v1 only;
+// protocol and firmware prerequisite: https://github.com/softerist/lofree.
+// Stock firmware does not supply a battery reading. LF2-v1 requires a complete 32-byte
+// reply, LF2 signature, version 1, additive checksum and explicit available status.
 #include "drivers.h"
 
 namespace {
@@ -39,7 +43,6 @@ const Dongle kDongles[] = {
     { 0x342D, 0xE51A, -1 },  // NUT65 (PR #2608, hardware untested)
     { 0x342D, 0xE487, -1 },  // RK 2.4G Dongle (PR #2609, hardware untested)
     { 0x342D, 0xE537, -1 },  // WEIKAV MAX102 (PR #2610, hardware untested)
-    { 0x388D, 0x0002, -1 },  // Lofree Flow2 (PR #2612, hardware untested)
     { 0x19F5, 0x3245, -1 },  // NuPhy Air75V2 (PR #2613, hardware untested)
     { 0x362D, 0xD028, -1 },  // SKN Qinglong (PR #2614, hardware untested)
     { 0x362D, 0xD030, -1 },  // Lemokey Link (PR #2616, hardware untested)
@@ -56,21 +59,31 @@ BYTE Sum(const std::vector<BYTE>& b, size_t from, size_t n) {
 }
 
 // Returns the level byte, or -1 when the dongle did not answer.
-int QueryLevel(HidDev& d) {
+int QueryLevel(HidDev& d, bool flow2 = false, ULONGLONG deadline = 0) {
     std::vector<BYTE> req(1 + kLen, 0);  // [0] = report id 0
     req[1] = 0x20;
     req[2] = 0x01;
     req[kLen] = Sum(req, 1, kLen - 1);
     d.Flush();
-    if (!d.Write(req)) return -1;
-    ULONGLONG end = GetTickCount64() + 500;
+    const ULONGLONG end = flow2 ? std::min(deadline, GetTickCount64() + 2500) : 0;
+    int writeMs = flow2 ? std::min(500, (int)((LONGLONG)end - (LONGLONG)GetTickCount64())) : 500;
+    if (writeMs <= 0 || !d.Write(req, writeMs)) return -1;
+    const ULONGLONG readEnd = flow2 ? end : GetTickCount64() + 500;
     for (;;) {
-        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
+        int left = (int)((LONGLONG)readEnd - (LONGLONG)GetTickCount64());
         if (left <= 0) return -1;
         std::vector<BYTE> r;
         int n = d.Read(r, left);  // report id 0 is stripped: r[0] is the first payload byte
         if (n < 0) return -1;
         if (n < 4 || r[0] != 0x20 || r[1] != 0x01 || r[2] != 0x00) continue;
+        if (flow2) {
+            // LF2-v1 is deliberately separate from legacy SONiX replies. A stock
+            // rejection or an incomplete packet must never become a percentage.
+            if (n != static_cast<int>(kLen) || r.size() != kLen || r[5] != 'L' || r[6] != 'F' || r[7] != '2' ||
+                r[8] != 1 || r[31] != Sum(r, 0, 31)) continue;
+            if (r[4] == 0 && r[3] == 0xFF) return -1;
+            if (r[4] != 1 || r[3] > 100) continue;
+        }
         return r[3];
     }
 }
@@ -81,6 +94,50 @@ std::wstring KeyboardName(const HidColl& c) {
     if (name.size() > suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0)
         name.resize(name.size() - suffix.size());
     return name.empty() ? L"Wireless keyboard" : name;
+}
+
+void PollFlow2Receiver(PollContext& ctx) {
+    constexpr USHORT vid = 0x388D, pid = 0x0002;
+    if (ctx.IsClaimed(vid, pid)) return;
+
+    // This model shares its USB ID and VIA collection with the cable connection.
+    // The receiver also exposes this separate 64-byte collection on interface 0.
+    const auto receiver = ctx.Find(vid, pid, [](const HidColl& c) {
+        return c.iface == 0 && c.page() == 0x0001 && c.usage() == 0 &&
+               c.inLen() == 64 && c.outLen() == 64 && c.featLen() == 0;
+    });
+    if (receiver.empty()) return;
+    const auto via = ctx.Find(vid, pid, [](const HidColl& c) {
+        return c.iface == 2 && c.page() == 0xFF60 && c.usage() == 0x0061 &&
+               c.inLen() == kLen + 1 && c.outLen() == kLen + 1;
+    });
+    if (via.empty()) return;
+
+    DeviceStatus s;
+    s.key = L"sonix:388D:0002";  // keep one tray entry if a battery reading becomes available
+    s.name = L"Lofree Flow 2 receiver";
+    s.kind = DeviceKind::Keyboard;
+    s.via = L"2.4 GHz receiver";
+    s.note = L"Battery unavailable";
+    s.retainLastPercent = false;
+    for (const HidColl* c : via) {
+        // LF2-v1 waits for fresh radio telemetry, which may arrive after the usual
+        // 500 ms SONiX window. One absolute four-second budget covers both attempts,
+        // including writes; unrelated input cannot extend it.
+        const ULONGLONG deadline = GetTickCount64() + 4000;
+        HidDev d;
+        if (!d.Open(*c)) continue;
+        int level = QueryLevel(d, true, deadline);
+        if (level < 0) level = QueryLevel(d, true, deadline);
+        if (level < 0) continue;
+        s.percent = level;
+        s.connected = true;  // zero is a valid received LF2 measurement
+        s.note.clear();
+        break;
+    }
+    // No grace period: an unavailable response must clear a previous reading.
+    s.graceSec = 0;
+    ctx.Add(s, vid, pid);
 }
 
 }  // namespace
@@ -110,4 +167,5 @@ void PollSonix(PollContext& ctx) {
             break;
         }
     }
+    PollFlow2Receiver(ctx);
 }
