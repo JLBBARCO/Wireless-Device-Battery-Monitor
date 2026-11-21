@@ -111,6 +111,7 @@ int main() {
         c.colls = { Collection(0x6425) };
         inputReport.clear();
         PollPressPlayIcarus(c);
+        assert(ajazzCommandIndex == 6);  // do not replay startup commands after a valid status
         assert(c.out.size() == 1);
         assert(c.out[0].percent == 100 && c.out[0].charging);
     }
