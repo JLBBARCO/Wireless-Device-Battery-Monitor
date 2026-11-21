@@ -124,17 +124,20 @@ void PollAjazzNearlink(PollContext& ctx) {
             return true;
         };
 
-        // Reproduce the app's observed, read-only setup sequence. SetOutputAndRead arms an
-        // input read before issuing each HID SET_REPORT, matching the captured control transfers.
-        for (const auto& command : AjazzStartupCommands()) {
-            std::vector<BYTE> reply;
-            if (session.device->SetOutputAndRead(command, reply, 250) > 0)
-                accept(reply);
+        // Reproduce the app's observed setup sequence until the first valid status arrives.
+        // Once initialized, keep the HID collection open and listen for later 06 FA status pushes
+        // rather than repeatedly replaying the app's startup/configuration exchange.
+        if (session.percent < 0) {
+            for (const auto& command : AjazzStartupCommands()) {
+                std::vector<BYTE> reply;
+                if (session.device->SetOutputAndRead(command, reply, 250) > 0)
+                    accept(reply);
+            }
         }
 
         // The battery/charging status is a separate 06 FA input report, not the 06 05/07/11/31
-        // command echo. It may arrive just after the setup exchange or be queued after a state
-        // change, so listen briefly and retain the last valid reading between polls.
+        // command echo. It may arrive just after setup or be queued after a state change, so
+        // listen briefly and retain the last valid reading between BatteryHub polls.
         for (int i = 0; i < 6; ++i) {
             std::vector<BYTE> report;
             int n = session.device->Read(report, i == 0 ? 1500 : 50);
