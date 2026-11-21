@@ -227,3 +227,4 @@ Off = כבוי
 You can unplug it = אפשר לנתק מהמטען
 {name} is charged to {percent}%. Stopping around here helps the battery last longer. = {name} נטען ל-{percent}%. עצירה בערך כאן עוזרת לסוללה להחזיק יותר זמן.
 unplug the dongle and plug it back in = נתק את המתאם וחבר אותו שוב
+Keep last known battery for mice = שמור ערך סוללה אחרון ידוע לעכברים
