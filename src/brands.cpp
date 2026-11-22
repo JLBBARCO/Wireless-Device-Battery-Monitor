@@ -26,6 +26,7 @@ const BrandStyle kBrands[] = {
     { Accent::Steam,        L"Steam",        {  26, 159, 255 }, {  11, 111, 191 } },  // #1A9FFF
     { Accent::Redragon,     L"Redragon",     { 230,   0,  18 }, { 192,   0,  15 } },  // #E60012
     { Accent::Wobkey,       L"Wobkey",       {  45,  96, 255 }, {  24,  63, 199 } },  // #2D60FF
+    { Accent::Ardor,        L"Ardor",        { 228,   2,  44 }, { 189,   1,  36 } },  // logo #E4022C
 };
 
 std::wstring Lower(std::wstring s) {
@@ -65,6 +66,7 @@ const KeyRule kKeys[] = {
     { L"steam:", Accent::Steam },
     { L"redragon:", Accent::Redragon },
     { L"wobkey:", Accent::Wobkey },
+    { L"xenta:", Accent::Ardor },
 };
 
 // Vendor ids that only one of these brands uses. Shared ones are left to the name check:
@@ -77,6 +79,7 @@ const VidRule kVids[] = {
     { 0x1B1C, Accent::Corsair },
     { 0x0951, Accent::HyperX },     // Kingston-era HyperX
     { 0x04A5, Accent::Zowie },      // BenQ
+    { 0x1D57, Accent::Ardor },      // Acrox/Xenta receivers: Ardor, Attack Shark and other OEM mice
     { 0x054C, Accent::PlayStation },
     { 0x04E8, Accent::Galaxy },
     { 0x05AC, Accent::Apple }, { 0x004C, Accent::Apple },  // USB / Bluetooth SIG company id
