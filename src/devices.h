@@ -61,6 +61,7 @@ struct DevicePollSnapshot {
     bool inventoryComplete = false;
     std::uint64_t sequence = 0;
     std::uint64_t capturedTick = 0;
+    std::map<std::pair<std::wstring, int>, BatteryOutcome> slotOutcomes;  // receiver-slot query evidence
 };
 
 // Queries every supported device. Blocking (can take a second or two); call from a worker thread.

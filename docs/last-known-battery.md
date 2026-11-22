@@ -61,6 +61,11 @@ Reconnecting requires a new confirmed reading before a value becomes available.
 Failed enumeration does not establish physical removal. Query failures cannot
 refresh a reading's receipt time.
 
+Logitech ping errors are scoped to the affected receiver slot. An error from an
+empty slot cannot change another device's query reason. A coarse legacy
+estimate cannot seed a newly established raw-percentage binding; that binding
+starts unknown until a validated percentage arrives.
+
 The Flow 2 identity is bounded by the physical receiver and its paired keyboard:
 the protocol does not establish an independent keyboard serial identity.
 Re-pairing a different keyboard to the same continuously connected receiver
@@ -162,7 +167,8 @@ production targets retain their normal build flags.
 
 ## Recorded local validation
 
-The staged Windows candidate is `BatteryHub-last-known-candidate.exe`, with
+The hardware observations below describe the preceding Windows candidate,
+`BatteryHub.exe`, with
 SHA-256:
 
 ```text

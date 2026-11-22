@@ -35,6 +35,7 @@ public:
     }
     bool hasLong() const { return hasLong_; }
     bool hadIoFailure() const { return ioFailure_; }
+    unsigned failureCount() const { return failureCount_; }
     BatteryOutcome requestOutcome() const { return requestOutcome_; }
 
     // Sends a request and waits for its reply. Returns 1 = reply (params in `p`), 0 = error reply
@@ -55,6 +56,7 @@ public:
         s_.Flush();
         if (!(useLong ? l_ : s_).Write(msg)) {
             ioFailure_ = true;
+            ++failureCount_;
             requestOutcome_ = BatteryOutcome::QueryFailed;
             return -1;
         }
@@ -72,6 +74,7 @@ public:
                     }
                     if ((r[2] == 0xFF || r[2] == 0x8F) && r[3] == b2 && r[4] == b3) {
                         err = r[5];
+                        ++failureCount_;
                         requestOutcome_ = BatteryOutcome::QueryFailed;
                         return 0;
                     }
@@ -97,6 +100,7 @@ private:
     HidDev s_, l_;
     bool hasShort_ = false, hasLong_ = false;
     bool ioFailure_ = false;
+    unsigned failureCount_ = 0;
     BatteryOutcome requestOutcome_ = BatteryOutcome::NoResponse;
 };
 
@@ -279,8 +283,7 @@ bool ReadBattery10(Hidpp& h, BYTE idx, DeviceStatus& s) {
 // and the collections of one interface differ only in "&colNN" and the last "&NNNN" of the
 // instance part. Returns an empty string for a path of another shape (all such paths then share
 // one group, which is how they were polled before).
-std::wstring PhysicalKey(const HidColl& c) {
-    if (!c.transportId.empty()) return c.transportId;
+std::wstring NormalizedPhysicalPath(const HidColl& c) {
     std::wstring p = c.path;
     for (auto& ch : p) ch = towlower(ch);
     size_t a = p.find(L'#');
@@ -295,18 +298,37 @@ std::wstring PhysicalKey(const HidColl& c) {
     return hw + L"#" + inst;
 }
 
+// Collection-path fallbacks are presence identities, not physical-device groups.
+// A sibling can supply a container only when the normalized path proves the
+// association and all matching container evidence agrees.
+std::wstring PhysicalKey(const HidColl& c, const std::vector<HidColl>& collections) {
+    if (!c.transportId.empty() && c.transportId.rfind(L"path:", 0) != 0) return c.transportId;
+    const auto path = NormalizedPhysicalPath(c);
+    if (path.empty()) return c.transportId;  // empty preserves legacy non-Windows grouping
+    std::wstring container;
+    for (const auto& sibling : collections) {
+        if (sibling.vid != c.vid || sibling.pid != c.pid ||
+            sibling.transportId.rfind(L"container:", 0) != 0 || NormalizedPhysicalPath(sibling) != path) continue;
+        if (!container.empty() && container != sibling.transportId) return path;
+        container = sibling.transportId;
+    }
+    return container.empty() ? path : container;
+}
+
 // Polls one physical device (receiver, cable or Bluetooth link) given its HID++ collections.
 // `suffix` keeps the fallback keys of identical receivers apart. Returns true if it reported a device.
 bool PollLogitechDevice(PollContext& ctx, USHORT pid, const std::vector<const HidColl*>& shorts,
-                        const std::vector<const HidColl*>& longs, const std::wstring& suffix) {
+                        const std::vector<const HidColl*>& longs, const std::wstring& suffix,
+                        const std::wstring& group) {
     if (shorts.empty() && longs.empty()) return false;
     const auto& physical = *(longs.empty() ? shorts[0] : longs[0]);
+    const auto& transport = group.rfind(L"container:", 0) == 0 ? group : physical.transportId;
     Hidpp h;
     if (!h.Open(shorts.empty() ? nullptr : shorts[0], longs.empty() ? nullptr : longs[0])) {
-        if (!physical.transportId.empty()) ctx.transportOutcomes[physical.transportId] = BatteryOutcome::QueryFailed;
+        if (!transport.empty()) ctx.transportOutcomes[transport] = BatteryOutcome::QueryFailed;
         return false;
     }
-    if (!physical.transportId.empty()) ctx.transportOutcomes[physical.transportId] = BatteryOutcome::NoResponse;
+    if (!transport.empty()) ctx.transportOutcomes[transport] = BatteryOutcome::NoResponse;
 
     std::wstring product = HidProduct(longs.empty() ? *shorts[0] : *longs[0]);
     bool isReceiver = product.find(L"Receiver") != std::wstring::npos || product.find(L"USB Receiver") != std::wstring::npos;
@@ -346,7 +368,15 @@ bool PollLogitechDevice(PollContext& ctx, USHORT pid, const std::vector<const Hi
         // latency on the initial ping when idle, whereas empty or offline receiver slots immediately
         // return a 0x8F error from the receiver in ~20 ms.
         int pingTimeoutMs = (idx == 0xFF) ? 400 : 1000;
+        const auto failuresBefore = h.failureCount();
         int r = h.Request(idx, 0x00, 0x10 | kSwId, { 0, 0, 0x5A }, p, err, false, pingTimeoutMs);
+        if (!transport.empty()) {
+            // Keep explicit failures local to this slot, including when no device
+            // record can be emitted. A successful ping alone is not a battery report.
+            ctx.slotOutcomes[{transport, idx}] = r == 1
+                ? (p.size() >= 3 && p[0] >= 2 ? BatteryOutcome::NoResponse : BatteryOutcome::InvalidResponse)
+                : h.requestOutcome();
+        }
         bool found = false;
         if (r == 1 && p.size() >= 3 && p[0] >= 2) {
             ReadNameAndType20(h, idx, s);
@@ -354,7 +384,7 @@ bool PollLogitechDevice(PollContext& ctx, USHORT pid, const std::vector<const Hi
             if (found && IsMxMaster4ReportedName(s.name) && s.percent >= 0 && s.percent <= 100)
                 StampBatteryReport(s);
             std::wstring unit = found ? ReadUnitId20(h, idx) : L"";
-            ApplyMxMaster4Policy(s, (longs.empty() ? shorts[0] : longs[0])->transportId, idx, unit);
+            ApplyMxMaster4Policy(s, transport, idx, unit);
             if (!unit.empty()) {
                 s.key = L"logi:unit:" + unit;
                 // Unplugging the cable hands a receiver device back to its receiver; keep the
@@ -369,10 +399,14 @@ bool PollLogitechDevice(PollContext& ctx, USHORT pid, const std::vector<const Hi
             if (s.kind == DeviceKind::Other) s.kind = GuessKind(s.name);
             ctx.out.push_back(s);
             any = true;
+        } else if (!transport.empty() && h.failureCount() != failuresBefore) {
+            // Follow-up metadata/feature errors must survive later unanswered
+            // requests without leaking a different slot's errors into this one.
+            ctx.slotOutcomes[{transport, idx}] = BatteryOutcome::QueryFailed;
         }
     }
-    if (!physical.transportId.empty() && h.hadIoFailure())
-        ctx.transportOutcomes[physical.transportId] = BatteryOutcome::QueryFailed;
+    if (!transport.empty() && h.hadIoFailure())
+        ctx.transportOutcomes[transport] = BatteryOutcome::QueryFailed;
     return any;
 }
 
@@ -397,18 +431,18 @@ void PollLogitech(PollContext& ctx) {
         std::vector<std::wstring> groups;
         for (const auto* list : { &allShorts, &allLongs })
             for (const HidColl* c : *list) {
-                std::wstring k = PhysicalKey(*c);
+                std::wstring k = PhysicalKey(*c, ctx.colls);
                 if (std::find(groups.begin(), groups.end(), k) == groups.end()) groups.push_back(k);
             }
 
         bool any = false;
         for (size_t g = 0; g < groups.size(); ++g) {
             std::vector<const HidColl*> shorts, longs;
-            for (const HidColl* c : allShorts) if (PhysicalKey(*c) == groups[g]) shorts.push_back(c);
-            for (const HidColl* c : allLongs) if (PhysicalKey(*c) == groups[g]) longs.push_back(c);
+            for (const HidColl* c : allShorts) if (PhysicalKey(*c, ctx.colls) == groups[g]) shorts.push_back(c);
+            for (const HidColl* c : allLongs) if (PhysicalKey(*c, ctx.colls) == groups[g]) longs.push_back(c);
             // Keys of the first device stay as they were; a second identical receiver gets "#2", ...
             std::wstring suffix = g ? L"#" + std::to_wstring(g + 1) : L"";
-            if (PollLogitechDevice(ctx, pid, shorts, longs, suffix)) any = true;
+            if (PollLogitechDevice(ctx, pid, shorts, longs, suffix, groups[g])) any = true;
         }
         if (any) ctx.Claim(vid, pid);
     }

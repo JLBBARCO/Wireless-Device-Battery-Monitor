@@ -47,7 +47,9 @@ inline Observation Observe(Reading& r, const DeviceStatus& s, std::uint64_t now)
     if (s.rawReportPolicy) {
         // An unidentified result cannot overwrite or borrow an established binding.
         if (s.cacheIdentity.empty() || s.transportId.empty()) return result;
-        if (!r.identity.empty() && !SameBinding(s, r)) {
+        // A legacy estimate has no raw binding and cannot seed its first one.
+        // A genuinely empty cache is still normal startup, not a replacement.
+        if ((!r.identity.empty() || r.percent >= 0) && !SameBinding(s, r)) {
             r = Reading{};
             result.bindingChanged = true;
         }
@@ -80,6 +82,8 @@ inline bool Removed(const Reading& r, const DevicePollSnapshot& poll) {
 }
 
 inline BatteryOutcome MissingOutcome(const Reading& r, const DevicePollSnapshot& poll) {
+    auto slot = poll.slotOutcomes.find({r.transport, r.slot});
+    if (slot != poll.slotOutcomes.end()) return slot->second;
     auto found = poll.transportOutcomes.find(r.transport);
     return found == poll.transportOutcomes.end() ? BatteryOutcome::QueryFailed : found->second;
 }

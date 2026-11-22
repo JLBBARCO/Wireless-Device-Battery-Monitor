@@ -173,6 +173,7 @@ DevicePollSnapshot PollDevicesSnapshot() {
     PollXInput(ctx);
     PollUnsupported(ctx);  // menu only: "No battery info"
     snapshot.transportOutcomes = std::move(ctx.transportOutcomes);
+    snapshot.slotOutcomes = std::move(ctx.slotOutcomes);
     snapshot.devices = std::move(ctx.out);
     return snapshot;
 }

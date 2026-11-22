@@ -1,5 +1,6 @@
 // Exercise the production poller and opt-in policy without HID access or real timers.
 #include "../src/drivers/drivers.h"
+#include "../src/battery_state.h"
 #include <cassert>
 #include <cstdio>
 #include <deque>
@@ -26,6 +27,10 @@ struct FakeMouse {
     bool batteryStatusAvailable = true;
     bool estimatesAvailable = false;
     bool capabilitiesError = false;
+    BYTE pingError = 0;
+    bool featureWriteFails = false;
+    bool featureError = false;
+    bool silenceAfterFeatureFailure = false;
 };
 static std::map<BYTE, FakeMouse> mice;
 static std::deque<std::vector<BYTE>> responses;
@@ -54,10 +59,24 @@ bool HidDev::Write(const std::vector<BYTE>& request, int) {
     const BYTE slot = request[1], feature = request[2], fn = request[3] >> 4;
     auto it = mice.find(slot);
     if (it == mice.end() || !it->second.responding) return true;
-    const auto& mouse = it->second;
+    auto& mouse = it->second;
+    if (feature == 0 && fn == 0 && mouse.featureWriteFails) {
+        if (mouse.silenceAfterFeatureFailure) mouse.responding = false;
+        return false;
+    }
     std::vector<BYTE> reply(20, 0);
     std::copy(request.begin(), request.begin() + 4, reply.begin());
-    if (feature == 0 && fn == 1) reply[4] = 2;  // HID++ 2.0 ping
+    if (feature == 0 && fn == 0 && mouse.featureError) {
+        if (mouse.silenceAfterFeatureFailure) mouse.responding = false;
+        reply[2] = 0xFF; reply[3] = feature; reply[4] = request[3]; reply[5] = 4;
+        responses.push_back(reply);
+        return true;
+    }
+    if (feature == 0 && fn == 1) {
+        if (mouse.pingError) {
+            reply[2] = 0xFF; reply[3] = feature; reply[4] = request[3]; reply[5] = mouse.pingError;
+        } else reply[4] = 2;  // HID++ 2.0 ping
+    }
     else if (feature == 0 && fn == 0) {
         const unsigned id = (request[4] << 8) | request[5];
         if (id == 0x0005 && !mouse.nameLookupResponding) return true;
@@ -99,6 +118,7 @@ int HidDev::Read(std::vector<BYTE>& reply, int timeoutMs) {
     if (responses.empty()) { now += timeoutMs; return -1; }
     reply = responses.front();
     responses.pop_front();
+    if (reply.size() > c_.inLen()) reply.resize(c_.inLen());
     return static_cast<int>(reply.size());
 }
 std::wstring HidProduct(const HidColl&) { return L"Logitech USB Receiver"; }
@@ -120,6 +140,171 @@ static PollContext PollReceiver() {
     ctx.inventoryComplete = true;
     PollLogitech(ctx);
     return ctx;
+}
+
+static DevicePollSnapshot Snapshot(const PollContext& ctx) {
+    DevicePollSnapshot snapshot;
+    snapshot.devices = ctx.out;
+    snapshot.presentTransports = ctx.presentTransports;
+    snapshot.inventoryComplete = ctx.inventoryComplete;
+    snapshot.transportOutcomes = ctx.transportOutcomes;
+    snapshot.slotOutcomes = ctx.slotOutcomes;
+    return snapshot;
+}
+
+static std::vector<HidColl> ReceiverCollections(const std::wstring& instance) {
+    HidColl shortColl, longColl;
+    shortColl.vid = longColl.vid = 0x046D;
+    shortColl.pid = longColl.pid = 0xC548;
+    const std::wstring prefix = L"\\\\?\\hid#vid_046d&pid_c548&mi_02&col";
+    shortColl.path = prefix + L"01#8&" + instance + L"&0&0000#{guid}";
+    longColl.path = prefix + L"02#8&" + instance + L"&0&0001#{guid}";
+    shortColl.caps.UsagePage = longColl.caps.UsagePage = 0xFF00;
+    shortColl.caps.Usage = 1; longColl.caps.Usage = 2;
+    shortColl.caps.InputReportByteLength = shortColl.caps.OutputReportByteLength = 7;
+    longColl.caps.InputReportByteLength = longColl.caps.OutputReportByteLength = 20;
+    shortColl.transportId = L"path:" + hid_inventory::Lower(shortColl.path);
+    longColl.transportId = L"path:" + hid_inventory::Lower(longColl.path);
+    return {shortColl, longColl};
+}
+
+static PollContext PollCollections(const std::vector<HidColl>& collections) {
+    PollContext ctx;
+    ctx.colls = collections;
+    for (const auto& c : collections) ctx.presentTransports.insert(c.transportId);
+    PollLogitech(ctx);
+    return ctx;
+}
+
+static void TestPhysicalGrouping() {
+    mice = {{1, FakeMouse{}}};
+    auto channels = ReceiverCollections(L"receiver-a");
+    const auto fallback = PollCollections(channels);
+    assert(fallback.out.size() == 1 && fallback.out[0].key == L"logi:unit:00000001");
+    assert(fallback.out[0].transportId == channels[1].transportId);
+    assert(PhysicalKey(channels[0], channels) == PhysicalKey(channels[1], channels));
+
+    const auto container = std::wstring(L"container:receiver-a");
+    channels[0].transportId = channels[1].transportId = container;
+    const auto known = PollCollections(channels).out.at(0);
+    for (const int missing : {0, 1}) {
+        auto mixed = channels;
+        mixed[missing].transportId = L"path:" + hid_inventory::Lower(mixed[missing].path);
+        const auto poll = PollCollections(mixed);
+        assert(poll.out.size() == 1 && poll.out[0].transportId == container);
+        assert(poll.out[0].cacheIdentity == known.cacheIdentity);
+        assert(poll.slotOutcomes.count({container, 1}) == 1);
+        battery_state::Reading reading;
+        battery_state::Observe(reading, known, now);
+        assert(!battery_state::Observe(reading, poll.out[0], now).bindingChanged);
+        mice[1].responding = false;
+        const auto idle = PollCollections(mixed);
+        assert(idle.out.empty() && idle.transportOutcomes.count(container));
+        assert(battery_state::MissingOutcome(reading, Snapshot(idle)) == BatteryOutcome::NoResponse);
+        mice[1].responding = true;
+    }
+
+    // Known containers continue to group collections on different interfaces.
+    auto crossInterface = channels;
+    const auto mi = crossInterface[1].path.find(L"mi_02");
+    assert(mi != std::wstring::npos);
+    crossInterface[1].path.replace(mi, 5, L"mi_03");
+    assert(PollCollections(crossInterface).out.size() == 1);
+
+    // A second identical receiver stays separate, independent of enumeration order.
+    auto both = ReceiverCollections(L"receiver-b");
+    both.insert(both.end(), channels.begin(), channels.end());
+    const auto first = PollCollections(both);
+    assert(first.out.size() == 2 && first.out[0].cacheIdentity != first.out[1].cacheIdentity);
+    std::reverse(both.begin(), both.end());
+    const auto reversed = PollCollections(both);
+    assert(reversed.out.size() == 2);
+    std::set<std::wstring> bindings;
+    for (const auto& s : first.out) bindings.insert(s.cacheIdentity);
+    for (const auto& s : reversed.out) assert(bindings.count(s.cacheIdentity));
+
+    // No container can be inferred from an unparseable path or conflicting evidence.
+    auto conflict = channels;
+    conflict[1].transportId = L"container:receiver-b";
+    auto extra = channels[0];
+    extra.transportId = L"path:" + hid_inventory::Lower(extra.path);
+    conflict.push_back(extra);
+    const auto ambiguous = PhysicalKey(extra, conflict);
+    assert(ambiguous != conflict[0].transportId && ambiguous != conflict[1].transportId);
+    extra.path = L"unparseable";
+    extra.transportId = L"path:unparseable";
+    assert(PhysicalKey(extra, conflict) == extra.transportId);
+    extra.transportId.clear();
+    assert(PhysicalKey(extra, conflict).empty());  // preserve legacy non-Windows behavior
+}
+
+static void TestSlotFailures() {
+    using namespace battery_state;
+    mice = {{1, FakeMouse{}}, {2, FakeMouse{"MX Master 4", 73, 2, true}}};
+    const auto first = PollReceiver();
+    assert(first.out.size() == 2);
+    Reading one, two;
+    Observe(one, first.out[0], now);
+    Observe(two, first.out[1], now);
+    mice[1].pingError = 4;
+    mice[2].responding = false;
+    const auto failed = Snapshot(PollReceiver());
+    assert(failed.devices.empty());
+    assert(MissingOutcome(one, failed) == BatteryOutcome::QueryFailed);
+    assert(MissingOutcome(two, failed) == BatteryOutcome::NoResponse);
+    for (const auto* reading : {&one, &two}) {
+        auto status = first.out[reading == &one ? 0 : 1];
+        status.percent = -1;
+        status.outcome = MissingOutcome(*reading, failed);
+        const auto view = Resolve(status, *reading, now, 60000, true);
+        assert(view.state == State::LastKnown && view.percent == reading->percent);
+        assert(view.reason == (reading == &one ? Reason::QueryFailed : Reason::NoResponse));
+    }
+    mice[1].pingError = 0;
+    // A valid ping followed by failed feature queries must preserve the error,
+    // even if a later request overwrites Hidpp's most recent request outcome.
+    for (const bool protocolError : {false, true}) {
+        for (const bool thenSilent : {false, true}) {
+            mice[1].responding = true;
+            mice[1].featureWriteFails = !protocolError;
+            mice[1].featureError = protocolError;
+            mice[1].silenceAfterFeatureFailure = thenSilent;
+            const auto failedFollowup = Snapshot(PollReceiver());
+            assert(failedFollowup.devices.empty());
+            assert(MissingOutcome(one, failedFollowup) == BatteryOutcome::QueryFailed);
+            assert(MissingOutcome(two, failedFollowup) == BatteryOutcome::NoResponse);
+        }
+    }
+    mice[1].featureWriteFails = mice[1].featureError = false;
+    mice[1].silenceAfterFeatureFailure = false;
+    mice[1].responding = true;
+    mice[2].responding = true;
+    const auto recovered = PollReceiver();
+    assert(recovered.out.size() == 2 && recovered.out[0].percent == 45 && recovered.out[1].percent == 73);
+}
+
+static void TestLegacyToRawBinding() {
+    using namespace battery_state;
+    mice = {{1, FakeMouse{}}};
+    mice[1].unified = true;
+    mice[1].percent = 0;
+    mice[1].nameLookupResponding = false;
+    const auto legacy = PollReceiver().out.at(0);
+    assert(!legacy.rawReportPolicy && legacy.percent == 5);
+    Reading reading;
+    assert(Observe(reading, legacy, now).sample && reading.identity.empty());
+    mice[1].nameLookupResponding = true;
+    mice[1].capabilitiesResponding = false;
+    const auto identified = PollReceiver().out.at(0);
+    assert(identified.key == legacy.key && identified.rawReportPolicy && identified.percent == -1);
+    const auto observation = Observe(reading, identified, now);
+    assert(observation.bindingChanged && !observation.sample);
+    assert(Resolve(identified, reading, now, 60000, true).state == State::Unknown);
+    assert(reading.percent == -1 && !reading.tick && reading.utc.empty());
+    mice[1].capabilitiesResponding = true;
+    const auto fresh = PollReceiver().out.at(0);
+    assert(fresh.percent == 0 && Observe(reading, fresh, now).sample);
+    assert(Resolve(fresh, reading, now, 60000, true).live);
 }
 
 static void TestProductionPoller() {
@@ -279,5 +464,8 @@ int main() {
     assert(!legacy.rawReportPolicy && legacy.cacheIdentity.empty());
     assert(legacy.outcome == BatteryOutcome::Unspecified && legacy.reportTick == 0);
     TestProductionPoller();
+    TestPhysicalGrouping();
+    TestSlotFailures();
+    TestLegacyToRawBinding();
     std::puts("Logitech idle policy and production poller tests passed");
 }

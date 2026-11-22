@@ -22,6 +22,7 @@ struct PollContext
     // Device keys that already had battery readings in the history when the app started (null in tests and
     // with history recording off). A driver can trust such a device to be real even when it is silent now.
     const std::set<std::wstring>* seenBefore = nullptr;
+    std::map<std::pair<std::wstring, int>, BatteryOutcome> slotOutcomes;  // must not affect other slots
     bool SeenBefore(const std::wstring &key) const { return seenBefore && seenBefore->count(key) != 0; }
 
     bool IsClaimed(USHORT vid, USHORT pid) const { return claimed.count({vid, pid}) != 0; }

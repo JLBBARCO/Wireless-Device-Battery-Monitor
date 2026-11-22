@@ -95,6 +95,17 @@ int main() {
     poll.transportOutcomes[s.transportId] = BatteryOutcome::NoResponse;
     assert(Missing(s, r, poll, 1000, 86401000, 30000, true) == MissingAction::KeepBound);
     assert(MissingOutcome(r, poll) == BatteryOutcome::NoResponse);
+    // Slot-specific failure evidence takes precedence without leaking across slots.
+    r.slot = 1;
+    poll.slotOutcomes[{r.transport, 1}] = BatteryOutcome::QueryFailed;
+    poll.slotOutcomes[{r.transport, 2}] = BatteryOutcome::NoResponse;
+    assert(MissingOutcome(r, poll) == BatteryOutcome::QueryFailed);
+    r.slot = 2;
+    assert(MissingOutcome(r, poll) == BatteryOutcome::NoResponse);
+    r.slot = 3;
+    assert(MissingOutcome(r, poll) == BatteryOutcome::NoResponse);  // transport fallback
+    r.slot = -1;
+    poll.slotOutcomes.clear();
     poll.presentTransports.clear();
     poll.inventoryComplete = false;
     assert(Missing(s, r, poll, 1000, 86401000, 30000, false) == MissingAction::KeepBound);
@@ -128,6 +139,30 @@ int main() {
     modelLookupFailed.cacheIdentity.clear();
     modelLookupFailed.percent = 45;
     assert(!CanApply(modelLookupFailed, r));  // same key may not silently lose its opt-in binding
+
+    // First raw binding must discard an unbound legacy estimate, but normal
+    // startup must not reset existing persisted charge tracking as a replacement.
+    Reading startup;
+    auto startupReport = Report(0);
+    auto initial = Observe(startup, startupReport, 1500);
+    assert(initial.sample && !initial.bindingChanged && startup.percent == 0);
+    for (const int legacyPercent : {0, 5, 100}) {
+        Reading legacyReading;
+        auto legacy = Report(legacyPercent);
+        legacy.rawReportPolicy = false;
+        legacy.cacheIdentity.clear();
+        legacy.outcome = BatteryOutcome::Unspecified;
+        assert(Observe(legacyReading, legacy, 1500).sample);
+        assert(legacyReading.identity.empty() && legacyReading.percent == legacyPercent);
+        auto unavailable = Report(-1);
+        unavailable.outcome = BatteryOutcome::NoResponse;
+        const auto firstBinding = Observe(legacyReading, unavailable, 2500);
+        assert(firstBinding.bindingChanged && !firstBinding.sample);
+        assert(legacyReading.percent == -1 && !legacyReading.tick && legacyReading.utc.empty());
+        assert(Resolve(unavailable, legacyReading, 2500, 30000, true).state == State::Unknown);
+        const auto recovered = Observe(legacyReading, startupReport, 3000);
+        assert(recovered.sample && !recovered.bindingChanged && legacyReading.percent == 0);
+    }
 
     // Same public key/name does not transfer readings to another receiver, slot or cable.
     for (const auto identity : {L"flow2|receiver-b", L"logi:unit:b|slot:2", L"cable:a"}) {
