@@ -60,6 +60,7 @@ const Dongle kDongles[] = {
     { 0x342D, 0xE4C5, -1 },  // M1 V5 VIA 2.4G KB (PR #4129, hardware untested)
     { 0x342D, 0xE471, -1 },  // EPOMAKER TIDE 75 (PR #4130, hardware untested)
     { 0x19F5, 0x32F5, -1 },  // NuPhy Halo75 V2 (PR #4131, hardware untested)
+    { 0x36B0, 0x3035, -1 },  // CIDOO QK61 (PR #4132, hardware untested)
 };
 
 const size_t kLen = 32;  // payload bytes after the report id; the last one is the checksum
