@@ -123,6 +123,8 @@ bool g_brandColors = false;  // off by default; known brands get their color (Ra
 std::atomic<DWORD> g_pollIntervalMs{ 60 * 1000 };  // set from the menu, read by the worker thread
 bool g_trackSince = false, g_trackAwake = false, g_trackEmpty = false;  // "Battery tracking" menu, off by default
 bool g_demo = false;         // --demo (see DemoDevices)
+bool g_trace = false;        // --trace: one line per poll in %TEMP%\wirelessbattery-trace.log (PR #303)
+std::atomic<long> g_lastCount{ 0 };  // devices in the previous poll, to spot one that went missing
 
 // Battery tracking: when each device was last charged and roughly how long it was awake since.
 // One REG_BINARY value per device key under HKCU\Software\WirelessBattery\ChargeTracker.
@@ -141,6 +143,7 @@ struct TrayEntry {
     ULONGLONG lastReadingTick = 0;  // last confirmed battery sample (PR #2143), for "Last reading: 5 min ago"
     bool added = false;
     bool lowWarned = false;
+    int missStreak = 0;      // consecutive polls the device was missing from (PR #303)
     bool limitWarned = false;  // "unplug at 80%" already shown during this charge
     bool shortWarned = false;  // "charge today" already shown during this discharge
     charge::Tracker charge;    // readings of the current charge, for "full in ~40 min"
@@ -1042,6 +1045,7 @@ void OnResults(std::vector<DeviceStatus>& results) {
         if (s.percent >= 0) e.lastPct = s.percent;
         if (reading_freshness::Confirmed(s.percent, s.connected, s.asleep)) e.lastReadingTick = GetTickCount64();
         e.lastSeen = GetTickCount64();
+        e.missStreak = 0;
         seen[s.key] = true;
         // Evaluate even in widget mode: ApplyEntry only manages tray icons.
         // Alert latches are kept by stable device key even if the driver briefly stops reporting it.
@@ -1090,8 +1094,12 @@ void OnResults(std::vector<DeviceStatus>& results) {
                            std::max<ULONGLONG>((ULONGLONG)e.st.graceSec * 1000, 2ULL * g_pollIntervalMs) &&
                        !liveNames.count(e.st.name);
         if (inGrace) {
-            e.st.percent = -1;
-            e.st.asleep = true;
+            // One missed answer is usually a receiver busy with input reports, not a sleeping device:
+            // keep the value solid and only dim it from the second missed poll on (PR #303).
+            if (++e.missStreak >= 2) {
+                e.st.percent = -1;
+                e.st.asleep = true;
+            }
             ApplyEntry(e);
         }
         if (!seen.count(it->first) && !inGrace) {
@@ -1896,6 +1904,50 @@ void RequestMonitor(refresh_policy::Mode mode, std::set<std::wstring> keys) {
     ReleaseSRWLockExclusive(&g_monitorLock);
 }
 
+// A receiver busy with input reports can miss a single status query. One quick re-read is much cheaper
+// than dimming the readout for a whole interval, so a poll with a device missing or without a level is
+// repeated once and both results are merged, the fresher reading winning (PR #303).
+std::vector<DeviceStatus> PollWithRetry() {
+    std::vector<DeviceStatus> first = PollAllDevices();
+    bool incomplete = first.empty();
+    for (const auto& s : first)
+        if (s.connected && !s.asleep && s.percent < 0 && s.levelText.empty()) incomplete = true;
+    long known = g_lastCount.load();
+    if (known > 0 && (long)first.size() < known) incomplete = true;
+    if (!incomplete || (first.empty() && known == 0)) {
+        g_lastCount = (long)first.size();
+        return first;
+    }
+    if (WaitForSingleObject(g_stopEvt, 250) == WAIT_OBJECT_0) return first;
+    std::vector<DeviceStatus> second = PollAllDevices();
+    std::set<std::wstring> keys;
+    for (const auto& s : second) keys.insert(s.key);
+    for (const auto& s : first) {
+        if (keys.count(s.key)) continue;
+        second.push_back(s);
+        keys.insert(s.key);
+    }
+    g_lastCount = (long)second.size();
+    return second;
+}
+
+// --trace: one line per poll, so "the readout blinks" reports can be checked against what the
+// receivers actually answered.
+void TracePoll(const std::vector<DeviceStatus>& v) {
+    if (!g_trace) return;
+    wchar_t path[MAX_PATH];
+    if (!GetTempPathW(MAX_PATH, path)) return;
+    wcscat_s(path, L"wirelessbattery-trace.log");
+    FILE* f = nullptr;
+    if (_wfopen_s(&f, path, L"a, ccs=UTF-8") != 0 || !f) return;
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    fwprintf(f, L"%02d:%02d:%02d.%03d  poll: %zu device(s)", st.wHour, st.wMinute, st.wSecond, st.wMilliseconds, v.size());
+    for (const auto& s : v) fwprintf(f, L"  [%ls %d%%%ls]", s.key.c_str(), s.percent, s.asleep ? L" asleep" : L"");
+    fwprintf(f, L"\n");
+    fclose(f);
+}
+
 DWORD WINAPI Worker(LPVOID) {
     refresh_policy::Monitor monitor;
     monitor.BeginStartup();
@@ -1909,7 +1961,8 @@ DWORD WINAPI Worker(LPVOID) {
         if (request == refresh_policy::Mode::Resume) monitor.BeginResume(std::move(keys));
         else if (request == refresh_policy::Mode::Arrival) monitor.BeginArrival(std::move(keys));
 
-        auto* v = new std::vector<DeviceStatus>(g_demo ? DemoDevices() : PollAllDevices());
+        auto* v = new std::vector<DeviceStatus>(g_demo ? DemoDevices() : PollWithRetry());
+        TracePoll(*v);
         DWORD delay = monitor.DelayAfterPoll(*v, g_pollIntervalMs);
         if (!PostMessageW(g_hwnd, WM_RESULTS, 0, (LPARAM)v)) delete v;
         DWORD wait = WaitForMultipleObjects(2, events, FALSE, delay);
@@ -2167,6 +2220,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
                     L"--dump   Print every HID collection and device\n"
                     L"--report Open the \"Request support for a device\" window\n"
                     L"--demo   Show sample devices\n"
+                    L"--trace  Log every poll to %TEMP%\\wirelessbattery-trace.log\n"
                     L"--quit   Quit a running instance",
                     L"BatteryHub", MB_OK | MB_ICONINFORMATION);
         return 0;
@@ -2205,6 +2259,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     }
     g_inst = inst;
     g_demo = cmdLine && wcsstr(cmdLine, L"--demo");
+    g_trace = cmdLine && wcsstr(cmdLine, L"--trace");
 
     HANDLE mutex = CreateMutexW(nullptr, TRUE, L"Local\\WirelessBatteryTray");
     if (GetLastError() == ERROR_ALREADY_EXISTS) return 0;
