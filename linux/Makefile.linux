@@ -25,6 +25,7 @@ DRIVERS := \
     src/drivers/logitech.cpp \
     src/drivers/razer.cpp \
     src/drivers/steelseries.cpp \
+    src/drivers/roccat.cpp \
     src/drivers/corsair.cpp \
     src/drivers/hyperx.cpp \
     src/drivers/playstation.cpp \

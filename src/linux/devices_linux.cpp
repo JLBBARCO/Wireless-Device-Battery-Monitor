@@ -22,6 +22,7 @@ std::vector<DeviceStatus> PollAllDevices() {
     PollLogitech(ctx);       // Unifying / Bolt / Lightspeed / Bluetooth HID++
     PollRazer(ctx);
     PollSteelSeries(ctx);
+    PollRoccat(ctx);         // ROCCAT Syn Max Air headset receiver
     PollCorsair(ctx);
     PollHyperX(ctx);
     PollPlayStation(ctx);    // DualShock 4 / DualSense over USB or Bluetooth HID

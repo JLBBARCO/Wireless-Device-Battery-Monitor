@@ -7,6 +7,7 @@ set(WB_PORTABLE_DRIVERS
     logitech.cpp
     razer.cpp
     steelseries.cpp
+    roccat.cpp
     corsair.cpp
     hyperx.cpp
     playstation.cpp
