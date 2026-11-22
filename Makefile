@@ -152,6 +152,8 @@ test: test-update-core test-update-win test-update-signature
 	./build/soundcore_protocol_test.exe
 	$(CXX) -std=c++17 -O2 -Wall tests/logitech_g435_0adf_test.cpp -o build/logitech_g435_0adf_test.exe
 	./build/logitech_g435_0adf_test.exe
+	$(CXX) $(CXXFLAGS) tests/logitech_g735_driver_test.cpp src/drivers/logitech_g735.cpp -o build/logitech_g735_driver_test.exe
+	./build/logitech_g735_driver_test.exe
 	$(CXX) -std=c++17 -O2 -Wall -Isrc tests/xenta_protocol_test.cpp src/drivers/xenta_protocol.cpp -o build/xenta_protocol_test.exe
 	./build/xenta_protocol_test.exe
 	$(CXX) -std=c++17 -O2 -Wall -Wextra tests/incott_protocol_test.cpp -o build/incott_protocol_test.exe
