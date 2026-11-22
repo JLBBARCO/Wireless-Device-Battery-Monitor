@@ -170,6 +170,12 @@ test: test-update-core test-update-win test-update-signature
 	./build/hid_events_test.exe
 	$(CXX) -std=c++17 -O2 -Wall tests/g435_estimate_test.cpp -o build/g435_estimate_test.exe
 	./build/g435_estimate_test.exe
+	$(CXX) -std=c++17 -O2 -Wall tests/battery_intelligence_test.cpp src/battery_intelligence.cpp src/i18n.cpp -o build/battery_intelligence_test.exe
+	./build/battery_intelligence_test.exe
+	$(CXX) -std=c++17 -O2 -Wall tests/dashboard_model_test.cpp src/battery_intelligence.cpp src/i18n.cpp -o build/dashboard_model_test.exe
+	./build/dashboard_model_test.exe
+	$(CXX) -std=c++17 -O2 -Wall tests/multi_battery_test.cpp -o build/multi_battery_test.exe
+	./build/multi_battery_test.exe
 	$(CXX) -std=c++17 -O2 -Wall tests/xbox_bluetooth_identity_test.cpp -o build/xbox_bluetooth_identity_test.exe
 	./build/xbox_bluetooth_identity_test.exe
 	$(CXX) $(CXXFLAGS) tests/jabra_driver_test.cpp src/drivers/jabra.cpp -o build/jabra_driver_test.exe

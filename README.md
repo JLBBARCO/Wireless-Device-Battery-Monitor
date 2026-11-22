@@ -81,6 +81,8 @@ show a temporary notification icon for up to one minute after an alert.
 Widget colours and the low-battery highlight still use the project's
 original global 15% threshold, independently of the notification setting.
 
+Two more warnings follow the first one during the same discharge: **10%** (when the threshold is above 10%) and **5%**. Turn them off with **Warn again at 10% and 5%** in the menu. **Notify when fully charged** says once per charge when a charging device is seen reaching full; a device that is already full when the app starts says nothing.
+
 ## Battery history & insights
 
 Right-click a device in the taskbar widget or tray menu and choose **Battery history...**.
@@ -89,6 +91,8 @@ The native, DPI-aware viewer (it follows the Windows light/dark theme) shows rec
 History is recorded **locally only** for connected, awake devices reporting a numeric percentage. Readings are sampled at most once every 30 minutes per device (except charging-state transitions, with a 60-second minimum). Data is kept for up to 30 days and the local file is kept under about 2 MB. The app never probes hardware beyond its existing polling, sends no history data over the network, and makes a conservative, approximate time-to-empty estimate from recent discharge observations only. At least four points, two hours, a three-percentage-point decline, a fresh reading and a stable discharge segment are required. Charging, old readings or insufficient data suppress the estimate; device-reported runtime is not available. The estimate is not a guarantee. Missing chart data is shown as gaps, not interpolated.
 
 Turn off **Record battery history** in the menu to stop saving readings; what was already saved stays until you clear it in the viewer. The file is stored in `%LOCALAPPDATA%\WirelessBattery\battery_history.tsv`. Its device identities are encoded (not encrypted); the file is local to your Windows account. In `--demo`, the chart uses synthetic data that is never saved. **Note:** history starts collecting only after this feature is installed and the app has been running for a while.
+
+**Device dashboard...** (main menu, or **View in dashboard...** in a device's submenu) opens a window with all devices: an overview with each device's level and drain rate, a details tab (drain rate, full-charge runtime, battery health where the hardware reports its design capacity, each earbud and the case on their own, a 7-day trend and recent charging sessions), a side-by-side comparison of drain rates, and the charging-session history. Charging sessions are recorded locally while **Record battery history** is on.
 
 ## Supported devices
 

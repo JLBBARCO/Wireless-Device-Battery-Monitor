@@ -28,6 +28,8 @@
 #include "alert_rules.h"
 #include "devices.h"
 #include "battery_history.h"
+#include "battery_intelligence.h"
+#include "dashboard.h"
 #include "charge_estimate.h"
 #include "i18n.h"
 #include "json_output.h"
@@ -66,7 +68,7 @@ constexpr UINT ALERT_ICON_ID = 2;
 enum MenuId : UINT {
     ID_REFRESH = 100, ID_AUTOSTART, ID_HIDE_LAST_KNOWN, ID_WIDGET_BACKGROUND, ID_EXIT, ID_MODE_WIDGET, ID_MODE_TRAY, ID_SUPPORT, ID_REPORT,
     ID_BRAND_COLORS, ID_STACKED, ID_SHOW_DISCONNECTED, ID_RECORD_HISTORY, ID_DIM_SLEEPING,
-    ID_TRAY_WHEN_EMPTY, ID_MAKE_ROOM, ID_FAR_LEFT, ID_PERCENT_SIGN, ID_RING_STYLE, ID_BEFORE_APPS, ID_CONNECTION_ICONS, ID_KEEP_MOUSE_LAST_KNOWN, ID_SHORT_RUNTIME_ALERT, ID_HOVER_CARD, ID_HOVER_CHART, ID_TRAY_DEVICE_ICONS, ID_ANIMATE_CHARGING, ID_TRACK_SINCE, ID_TRACK_AWAKE, ID_TRACK_EMPTY, ID_RUNTIME_WIDGET, ID_MODE_MYFINDER,
+    ID_TRAY_WHEN_EMPTY, ID_MAKE_ROOM, ID_FAR_LEFT, ID_PERCENT_SIGN, ID_RING_STYLE, ID_BEFORE_APPS, ID_CONNECTION_ICONS, ID_KEEP_MOUSE_LAST_KNOWN, ID_SHORT_RUNTIME_ALERT, ID_HOVER_CARD, ID_HOVER_CHART, ID_TRAY_DEVICE_ICONS, ID_ANIMATE_CHARGING, ID_TRACK_SINCE, ID_TRACK_AWAKE, ID_TRACK_EMPTY, ID_RUNTIME_WIDGET, ID_MODE_MYFINDER, ID_CHARGED_ALERT, ID_TIERED_ALERTS, ID_DASHBOARD,
     ID_PLACE_AUTO, ID_PLACE_TOP, ID_PLACE_TRAY, ID_PLACE_BOTTOM,  // "Position on a vertical taskbar"
     ID_POSITION_FIRST = 700,  // "Position on the taskbar": ID_POSITION_FIRST + 0..5, then the custom value
     ID_POLL_FIRST = 500,  // "Check battery every": ID_POLL_FIRST + 0..7
@@ -78,7 +80,8 @@ enum MenuId : UINT {
 };
 enum DeviceCmd : UINT {
     DEV_TOGGLE, DEV_LEFT, DEV_RIGHT, DEV_RENAME, DEV_RESET_NAME, DEV_HISTORY,
-    DEV_ALERT_FIRST = 6, DEV_ALERT_DEFAULT = DEV_ALERT_FIRST + 8, DEV_ALERT_OFF, DEV_STRIDE = 16
+    DEV_ALERT_FIRST = 6, DEV_ALERT_DEFAULT = DEV_ALERT_FIRST + 8, DEV_ALERT_OFF,
+    DEV_DASHBOARD = 16, DEV_STRIDE = 32
 };
 
 const wchar_t* kAppName = L"BatteryHub";
@@ -109,6 +112,8 @@ bool g_showDisconnectedDevices = false;  // opt-in, explicit driver-reported off
 bool g_dimSleeping = true;  // dim a sleeping device's last known value (menu option, on by default)
 bool g_recordHistory = true;  // save readings for "Battery history..." (menu option, on by default)
 int g_chargeLimit = 0;        // "Notify when charged to" 80/85/90%, 0 = off (the default)
+bool g_chargedAlert = true;   // "fully charged" notification (PR #3946, menu option)
+bool g_tieredAlerts = true;   // extra low-battery warnings at 10% and 5% (PR #3946, menu option)
 bool g_shortRuntimeAlert = true;  // "charge today" notification when the time-to-empty is under 12 h (menu option)
 bool g_hoverCard = true;       // card when the mouse rests on a device (off: plain tooltip)
 bool g_hoverChart = true;      // 24-hour chart in that card
@@ -153,6 +158,7 @@ struct TrayEntry {
     ULONGLONG lastReadingTick = 0;  // last confirmed battery sample (PR #2143), for "Last reading: 5 min ago"
     bool added = false;
     bool lowWarned = false;
+    bool chargedWarned = false;  // "fully charged" already shown during this charge (PR #3946)
     int missStreak = 0;      // consecutive polls the device was missing from (PR #303)
     bool limitWarned = false;  // "unplug at 80%" already shown during this charge
     bool shortWarned = false;  // "charge today" already shown during this discharge
@@ -164,7 +170,7 @@ struct TrayEntry {
 };
 std::map<std::wstring, TrayEntry> g_entries;
 std::vector<std::wstring> g_unsupported;  // seen wireless mice / keyboards without a battery driver, menu only (PR #2463)
-std::map<std::wstring, bool> g_alertLatches;  // survive transient removal of a device
+std::map<std::wstring, alerts::LowLatch> g_alertLatches;  // survive transient removal of a device
 bool g_alertIconAdded = false;  // short-lived tray icon for widget-mode notifications
 bool g_placeholder = false;
 HICON g_placeholderIcon = nullptr;
@@ -818,9 +824,17 @@ void ShowNotification(TrayEntry& e, const std::wstring& title, const std::wstrin
     if (g_alertIconAdded) SetTimer(g_hwnd, TIMER_ALERT_ICON, 60 * 1000, nullptr);
 }
 
-void ShowBatteryAlert(TrayEntry& e) {
-    ShowNotification(e, T(L"Low battery"), TF(L"{name} is at {percent}%",
-                                              { { L"name", DisplayName(e) }, { L"percent", std::to_wstring(e.st.percent) } }));
+void ShowBatteryAlert(TrayEntry& e, alerts::LowAlert level) {
+    const wchar_t* title = level == alerts::LowAlert::Emergency ? L"Battery almost empty"
+                         : level == alerts::LowAlert::Critical  ? L"Battery critically low"
+                                                                : L"Low battery";
+    const wchar_t* text = level == alerts::LowAlert::Emergency ? L"{name} is at {percent}%. Charge it now."
+                                                               : L"{name} is at {percent}%";
+    ShowNotification(e, T(title), TF(text, { { L"name", DisplayName(e) }, { L"percent", std::to_wstring(e.st.percent) } }));
+}
+
+void ShowChargedAlert(TrayEntry& e) {
+    ShowNotification(e, T(L"Fully charged"), TF(L"{name} is fully charged.", { { L"name", DisplayName(e) } }));
 }
 
 void ShowChargeLimitAlert(TrayEntry& e) {
@@ -1037,6 +1051,7 @@ void SmoothCharging(DeviceStatus& s) {
 }
 
 void OnResults(std::vector<DeviceStatus>& results) {
+    if (dashboard::IsOpen()) dashboard::UpdateDevices(results, battery_history::GetStore());
     g_unsupported.clear();
     results.erase(std::remove_if(results.begin(), results.end(), [](const DeviceStatus& s) {
                       if (s.unsupported) g_unsupported.push_back(s.name);
@@ -1059,14 +1074,16 @@ void OnResults(std::vector<DeviceStatus>& results) {
         seen[s.key] = true;
         // Evaluate even in widget mode: ApplyEntry only manages tray icons.
         // Alert latches are kept by stable device key even if the driver briefly stops reporting it.
-        if (const auto it = g_alertLatches.find(s.key); it != g_alertLatches.end())
-            e.lowWarned = it->second;
-        bool notify = !IsHidden(s.key) &&
-                      alerts::ShouldNotify(s, alerts::EffectiveThreshold(g_alertOverrides, s.key), e.lowWarned);
-        g_alertLatches[s.key] = e.lowWarned;
+        alerts::LowLatch& latch = g_alertLatches[s.key];
+        alerts::LowAlert low = IsHidden(s.key) ? alerts::LowAlert::None
+                             : alerts::EvaluateLow(s, alerts::EffectiveThreshold(g_alertOverrides, s.key), latch, g_tieredAlerts);
+        e.lowWarned = latch.low;
+        bool notify = low != alerts::LowAlert::None;
         if (g_alertLatches.size() > 256) g_alertLatches.erase(g_alertLatches.begin());
+        bool charged = g_chargedAlert && !IsHidden(s.key) && alerts::ShouldNotifyCharged(s, previousPercent, e.chargedWarned);
         if (g_recordHistory && s.connected && !s.asleep && s.percent >= 0)
             battery_history::Observe(s.key, s.percent, s.charging);
+        if (g_recordHistory && !g_demo) battery_intelligence::ObserveDevice(s, (int64_t)time(nullptr));  // charging sessions (PR #3946)
         bool limit = !IsHidden(s.key) && alerts::ShouldNotifyChargeLimit(s, g_chargeLimit, previousPercent, e.limitWarned);
         if (s.connected && !s.asleep) charge::Observe(e.charge, s.charging, s.percent, (int64_t)time(nullptr));
         bool shortRuntime = false;
@@ -1084,7 +1101,8 @@ void OnResults(std::vector<DeviceStatus>& results) {
         }
         if (!g_demo && (g_trackSince || g_trackAwake)) TrackCharge(e, s, sampleMs);
         ApplyEntry(e);
-        if (notify) ShowBatteryAlert(e);
+        if (notify) ShowBatteryAlert(e, low);
+        else if (charged) ShowChargedAlert(e);
         else if (limit) ShowChargeLimitAlert(e);
         else if (shortRuntime && !left.empty()) ShowShortRuntimeAlert(e, left);
     }
@@ -1456,6 +1474,7 @@ void ShowMenu() {
         icons.SetLast(sub, 0xEA8F);  // Ringer
         AppendMenuW(sub, MF_STRING, base + DEV_HISTORY, T(L"Battery history..."));
         icons.SetLast(sub, 0xE81C);  // History
+        AppendMenuW(sub, MF_STRING, base + DEV_DASHBOARD, T(L"View in dashboard..."));
         std::wstring line = DisplayName(*e) + L"  ·  " + StatusText(*e);
         AppendMenuW(m, MF_POPUP | (IsHidden(k) ? 0 : MF_CHECKED), (UINT_PTR)sub, line.c_str());
         icons.SetLast(m, widget::DeviceGlyph(e->st.kind, e->st.via == L"Bluetooth"));
@@ -1483,6 +1502,8 @@ void ShowMenu() {
         CheckMenuRadioItem(sub, ID_LIMIT_OFF, ID_LIMIT_FIRST + alerts::kChargeLimitCount - 1, checked, MF_BYCOMMAND);
         AppendMenuW(m, MF_POPUP, (UINT_PTR)sub, T(L"Notify when charged to (saves the battery)"));
     }
+    AppendMenuW(m, MF_STRING | (g_chargedAlert ? MF_CHECKED : 0), ID_CHARGED_ALERT, T(L"Notify when fully charged"));
+    AppendMenuW(m, MF_STRING | (g_tieredAlerts ? MF_CHECKED : 0), ID_TIERED_ALERTS, T(L"Warn again at 10% and 5%"));
     AppendMenuW(m, MF_STRING | (g_shortRuntimeAlert ? MF_CHECKED : 0) | (g_recordHistory ? 0 : MF_GRAYED), ID_SHORT_RUNTIME_ALERT,
                 T(L"Warn when a battery won't last the day"));
     {
@@ -1642,6 +1663,7 @@ void ShowMenu() {
         AppendMenuW(m, MF_POPUP, (UINT_PTR)sub, T(L"Check battery every"));
         icons.SetLast(m, 0xE916);  // Stopwatch
     }
+    AppendMenuW(m, MF_STRING, ID_DASHBOARD, T(L"Device dashboard..."));
     AppendMenuW(m, MF_STRING, ID_REFRESH, T(L"Refresh now"));
     AppendMenuW(m, MF_STRING | (AutostartEnabled() ? MF_CHECKED : 0), ID_AUTOSTART, T(L"Start with Windows"));
     AppendMenuW(m, MF_STRING, ID_REPORT, T(L"Request support for a device..."));
@@ -1688,6 +1710,16 @@ void ShowMenu() {
         case ID_DIM_SLEEPING: SetDimSleeping(!g_dimSleeping); break;
         case ID_RECORD_HISTORY: g_recordHistory = !g_recordHistory; SaveRecordHistory(g_recordHistory); UpdateWidget(); break;
         case ID_LIMIT_OFF: SetChargeLimit(0); break;
+        case ID_DASHBOARD:
+            dashboard::Show(g_hwnd);
+            {
+                std::vector<DeviceStatus> live;
+                for (auto& [k, e] : g_entries) live.push_back(e.st);
+                dashboard::UpdateDevices(live, battery_history::GetStore());
+            }
+            break;
+        case ID_CHARGED_ALERT: g_chargedAlert = !g_chargedAlert; SaveBoolSetting(L"ChargedAlert", g_chargedAlert); break;
+        case ID_TIERED_ALERTS: g_tieredAlerts = !g_tieredAlerts; SaveBoolSetting(L"TieredAlerts", g_tieredAlerts); break;
         case ID_SHORT_RUNTIME_ALERT: g_shortRuntimeAlert = !g_shortRuntimeAlert; SaveBoolSetting(L"ShortRuntimeAlert", g_shortRuntimeAlert); break;
         case ID_HOVER_CARD:
         case ID_HOVER_CHART:
@@ -1777,6 +1809,10 @@ void ShowMenu() {
                     case DEV_RESET_NAME: ResetDeviceName(key); break;
                     case DEV_ALERT_DEFAULT: SetAlertOverride(key, alerts::kUseDefault); break;
                     case DEV_ALERT_OFF: SetAlertOverride(key, alerts::kDisabled); break;
+                    case DEV_DASHBOARD:
+                        dashboard::Show(g_hwnd);
+                        dashboard::SelectDevice(key);
+                        break;
                     case DEV_HISTORY: {
                         auto it = g_entries.find(key);
                         if (it != g_entries.end())
@@ -2098,6 +2134,8 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             KillTimer(h, TIMER_ALERT_ICON);
             if (g_alertIconAdded) { TrayDelete(ALERT_ICON_ID); g_alertIconAdded = false; }
             widget::Destroy();
+            dashboard::Close();
+            battery_intelligence::Shutdown();
             for (auto& src : g_sources) src->Stop();
             SetEvent(g_stopEvt);
             if (g_worker) WaitForSingleObject(g_worker, 5000);
@@ -2379,6 +2417,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     g_recordHistory = LoadRecordHistory();
     g_chargeLimit = LoadChargeLimit();
     g_shortRuntimeAlert = LoadBoolSetting(L"ShortRuntimeAlert", true);
+    g_chargedAlert = LoadBoolSetting(L"ChargedAlert", true);
+    g_tieredAlerts = LoadBoolSetting(L"TieredAlerts", true);
     g_hoverCard = LoadBoolSetting(L"HoverCard", true);
     g_hoverChart = LoadBoolSetting(L"HoverCardChart", true);
     widget::SetCardOptions(g_hoverCard, g_hoverChart);
@@ -2417,6 +2457,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     LoadAliases();
     LoadAlertThresholds();
     battery_history::Initialize(g_demo);
+    battery_intelligence::Initialize(g_demo);
     Reconcile();
     UpdatePlaceholder();  // something to click on until the first poll finishes
     SetTimer(g_hwnd, TIMER_WIDGET, 1000, nullptr);

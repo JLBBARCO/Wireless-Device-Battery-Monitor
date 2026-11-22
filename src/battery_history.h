@@ -2,6 +2,7 @@
 #include <windows.h>
 #include <set>
 #include <string>
+#include "history_model.h"
 #include <vector>
 
 namespace battery_history {
@@ -29,6 +30,8 @@ std::vector<Point> Recent(const std::wstring& key, int hours);
 std::wstring EstimatedRuntimeText(const std::wstring& key);
 // Non-modal native Win32 history viewer; device identity remains the original key.
 void Show(HWND owner, const std::wstring& key, const std::wstring& displayName);
+// The in-memory sample store, for the device dashboard (PR #3946).
+const Store& GetStore();
 // The viewer's "Estimated time to empty" as text ("~2 d 5 h"), or empty when there is none.
 std::wstring TimeToEmpty(const std::wstring& key);
 } // namespace battery_history
