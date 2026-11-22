@@ -62,6 +62,7 @@ const Dongle kDongles[] = {
     { 0x19F5, 0x32F5, -1 },  // NuPhy Halo75 V2 (PR #4131, hardware untested)
     { 0x36B0, 0x3035, -1 },  // CIDOO QK61 (PR #4132, hardware untested)
     { 0x36B0, 0x3005, -1 },  // Linky87 (PR #4133, hardware untested)
+    { 0x342D, 0xEA80, -1 },  // IO Custom 68 2.4G (PR #4134, hardware untested)
 };
 
 const size_t kLen = 32;  // payload bytes after the report id; the last one is the checksum
