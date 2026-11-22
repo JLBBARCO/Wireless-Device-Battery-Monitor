@@ -64,6 +64,7 @@ const Dongle kDongles[] = {
     { 0x36B0, 0x3005, -1 },  // Linky87 (PR #4133, hardware untested)
     { 0x342D, 0xEA80, -1 },  // IO Custom 68 2.4G (PR #4134, hardware untested)
     { 0x36B0, 0x2003, -1 },  // wireless 2.4G Dongle (PR #4135, hardware untested)
+    { 0x362D, 0xD107, -1 },  // JZM5 (PR #4136, hardware untested)
 };
 
 const size_t kLen = 32;  // payload bytes after the report id; the last one is the checksum
