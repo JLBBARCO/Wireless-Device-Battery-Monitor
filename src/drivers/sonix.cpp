@@ -47,6 +47,7 @@ const Dongle kDongles[] = {
     { 0x342D, 0xE49F, -1 },  // Spade65-QMK-2.4GHz (PR #2619, hardware untested)
     { 0x0DB0, 0x8A8F, -1 },  // MSI FORGE GK600 TKL WIRELESS (PR #4117, hardware untested)
     { 0x373B, 0x111F, -1 },  // ATK A87Pro (PR #4118, hardware untested)
+    { 0x55D4, 0x0664, -1 },  // W-SOFLE keyboard (PR #4119, hardware untested)
 };
 
 const size_t kLen = 32;  // payload bytes after the report id; the last one is the checksum
