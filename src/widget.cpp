@@ -451,13 +451,19 @@ std::vector<Piece> Layout(int barW, int barH, int& width, int& height) {
     DeleteObject(caption);
 
     height = barH;
-    const int rowGap = Px(2), barRoom = Px(5);  // barRoom: space for a brand level bar under the text
+    const int rowGap = Px(2);
+    const int barRoom = Px(3) + std::max(2, Px(2));
     int iconH = 0, textH = 0;
+    bool hasBar = false;
     for (const Slot& s : slots) {
         iconH = std::max(iconH, out[s.icon].m.h);
         textH = std::max(textH, out[s.label].m.h);
+        hasBar |= out[s.label].barPct >= 0;
     }
-    bool stacked = !g_vertical && g_stacked && !slots.empty() && barH >= iconH + rowGap + textH + barRoom + Px(6);
+    const int stackedBarRoom = hasBar ? barRoom : 0;
+    const int stackedPadding = Px(6);  // Minimum space above and below the stack.
+    bool stacked = !g_vertical && g_stacked && !slots.empty() &&
+                   barH >= iconH + rowGap + textH + stackedBarRoom + 2 * stackedPadding;
     if (g_vertical) {
         // One block per device, centred in the bar's width: icon, then the percentage (and bolt) under it.
         width = barW;
@@ -492,7 +498,7 @@ std::vector<Piece> Layout(int barW, int barH, int& width, int& height) {
     }
     if (stacked) {
         // Icon on top (bolt to its right), percentage centred under it; the pair centred in the bar's height.
-        int top = (barH - (iconH + rowGap + textH + barRoom)) / 2;
+        int top = (barH - (iconH + rowGap + textH + stackedBarRoom)) / 2;
         int x = Px(8);
         for (const Slot& s : slots) {
             Piece& ic = out[s.icon];
