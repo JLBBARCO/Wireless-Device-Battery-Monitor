@@ -49,6 +49,7 @@ const Dongle kDongles[] = {
     { 0x373B, 0x111F, -1 },  // ATK A87Pro (PR #4118, hardware untested)
     { 0x55D4, 0x0664, -1 },  // W-SOFLE keyboard (PR #4119, hardware untested)
     { 0xFFFE, 0x003D, -1 },  // CM81 Zeno (PR #4120, hardware untested)
+    { 0xFFFE, 0x0047, -1 },  // Vortex NS75 (PR #4121, hardware untested)
 };
 
 const size_t kLen = 32;  // payload bytes after the report id; the last one is the checksum
