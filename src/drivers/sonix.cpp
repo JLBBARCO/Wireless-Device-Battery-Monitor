@@ -56,6 +56,7 @@ const Dongle kDongles[] = {
     { 0x373B, 0x1193, -1 },  // REKT Hiro 60 (PR #4125, hardware untested)
     { 0x373B, 0x11FF, -1 },  // ATK YOGO 75 PRO (PR #4126, hardware untested)
     { 0x6D66, 0x8572, -1 },  // Meletrix Zoom64 (PR #4127, hardware untested)
+    { 0x36B0, 0x3122, -1 },  // CIDOO QK104PRO (PR #4128, hardware untested)
 };
 
 const size_t kLen = 32;  // payload bytes after the report id; the last one is the checksum
