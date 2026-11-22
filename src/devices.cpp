@@ -119,6 +119,7 @@ std::vector<DeviceStatus> PollAllDevices() {
     PollBarracudaPro(ctx);   // before the generic Razer driver as well
     PollHyperX(ctx);
     PollLogitechG435(ctx);  // before the HID++ driver, which shares the vendor id
+    PollLogitechG435Jieli(ctx);
     PollLogitechG735(ctx);  // likewise
     PollAstro(ctx);
     PollLogitech(ctx);

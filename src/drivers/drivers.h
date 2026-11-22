@@ -151,6 +151,7 @@ void PollAtkBitmouse(PollContext& ctx);  // ATK / VXE NK NANO dongle 373B:1216, 
 void PollChimera(PollContext& ctx);      // Chimera V2 mouse (3554:F512, before Kysona, same vendor id)
 void PollKysona(PollContext& ctx);    // also Pulsar, ATK / VXE, Hitscan Hyperlight
 void PollHyperX(PollContext& ctx);
+void PollLogitechG435Jieli(PollContext& ctx);  // G435 on the Jieli 4C4A:4155 receiver: Bluetooth-calibrated estimate (PR #632)
 void PollLogitechG435(PollContext& ctx);  // G435 headset on the 046D:0ADF dongle (not HID++)
 void PollLogitechG735(PollContext& ctx);  // G735 headset on the 046D:0AD8 dongle (Centurion HID++ in report F2)
 void PollAstro(PollContext& ctx);  // A50 X / Gen 5 vendor protocol (before generic Logitech)
