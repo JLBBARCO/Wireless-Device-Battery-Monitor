@@ -1,5 +1,4 @@
-// The Windows HID backend. Linux uses hid_linux.cpp instead; this file is compiled only when
-// _WIN32 is defined so the existing Windows behaviour is byte-for-byte unchanged.
+// The Windows HID backend. Linux uses hid_linux.cpp instead.
 #ifdef _WIN32
 
 #include "hid.h"
@@ -12,48 +11,74 @@
 #include <cstring>
 #include <cwctype>
 
-std::vector<HidColl> EnumHid() {
-    std::vector<HidColl> out;
-    GUID hidGuid;
-    HidD_GetHidGuid(&hidGuid);
-    HDEVINFO di = SetupDiGetClassDevsW(&hidGuid, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
-    if (di == INVALID_HANDLE_VALUE) return out;
-    SP_DEVICE_INTERFACE_DATA ifd{ sizeof(ifd) };
-    for (DWORD i = 0; SetupDiEnumDeviceInterfaces(di, nullptr, &hidGuid, i, &ifd); i++) {
+std::wstring HidContainer(const std::wstring& path);
+
+namespace {
+class WindowsHidInventory {
+public:
+    bool Begin() {
+        HidD_GetHidGuid(&guid_);
+        devices_ = SetupDiGetClassDevsW(&guid_, nullptr, nullptr, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+        return devices_ != INVALID_HANDLE_VALUE;
+    }
+
+    hid_inventory::Step Next(unsigned index, HidColl& coll, std::wstring& container) {
+        SP_DEVICE_INTERFACE_DATA ifd{ sizeof(ifd) };
+        if (!SetupDiEnumDeviceInterfaces(devices_, nullptr, &guid_, index, &ifd))
+            return GetLastError() == ERROR_NO_MORE_ITEMS ? hid_inventory::Step::Finished : hid_inventory::Step::Failed;
         DWORD need = 0;
-        SetupDiGetDeviceInterfaceDetailW(di, &ifd, nullptr, 0, &need, nullptr);
-        if (!need) continue;
+        SetupDiGetDeviceInterfaceDetailW(devices_, &ifd, nullptr, 0, &need, nullptr);
+        if (need < sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W)) return hid_inventory::Step::Skipped;
         std::vector<BYTE> buf(need);
         auto det = reinterpret_cast<SP_DEVICE_INTERFACE_DETAIL_DATA_W*>(buf.data());
         det->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA_W);
-        if (!SetupDiGetDeviceInterfaceDetailW(di, &ifd, det, need, nullptr, nullptr)) continue;
-        HANDLE h = CreateFileW(det->DevicePath, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (!SetupDiGetDeviceInterfaceDetailW(devices_, &ifd, det, need, nullptr, nullptr))
+            return hid_inventory::Step::Skipped;
+        coll.path = det->DevicePath;
+        const std::wstring lower = hid_inventory::Lower(coll.path);
+        size_t vid = lower.find(L"vid_"), pid = lower.find(L"pid_"), mi = lower.find(L"&mi_");
+        if (vid != std::wstring::npos) coll.vid = static_cast<USHORT>(wcstoul(lower.c_str() + vid + 4, nullptr, 16));
+        if (pid != std::wstring::npos) coll.pid = static_cast<USHORT>(wcstoul(lower.c_str() + pid + 4, nullptr, 16));
+        if (mi != std::wstring::npos) coll.iface = static_cast<int>(wcstol(lower.c_str() + mi + 4, nullptr, 16));
+        container = HidContainer(coll.path);
+        return hid_inventory::Step::Found;
+    }
+
+    bool Load(HidColl& coll) {
+        HANDLE h = CreateFileW(coll.path.c_str(), 0, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
         DWORD err = h == INVALID_HANDLE_VALUE ? GetLastError() : 0;
-        if (h == INVALID_HANDLE_VALUE && err != ERROR_SHARING_VIOLATION) continue;
-        HidColl c;
-        c.path = det->DevicePath;
-        std::wstring lower = c.path;
-        for (auto& ch : lower) ch = towlower(ch);
+        if (h == INVALID_HANDLE_VALUE && err != ERROR_SHARING_VIOLATION) return false;
         if (h != INVALID_HANDLE_VALUE) {
             HIDD_ATTRIBUTES a{ sizeof(a) };
-            if (HidD_GetAttributes(h, &a)) { c.vid = a.VendorID; c.pid = a.ProductID; c.version = a.VersionNumber; }
+            if (HidD_GetAttributes(h, &a)) { coll.vid = a.VendorID; coll.pid = a.ProductID; coll.version = a.VersionNumber; }
             PHIDP_PREPARSED_DATA pp;
-            if (HidD_GetPreparsedData(h, &pp)) { HidP_GetCaps(pp, &c.caps); HidD_FreePreparsedData(pp); }
+            if (HidD_GetPreparsedData(h, &pp)) { HidP_GetCaps(pp, &coll.caps); HidD_FreePreparsedData(pp); }
             CloseHandle(h);
         } else {
-            // Exclusive lock held by a vendor UWP app (e.g. Astro Command Center): recover VID/PID from path.
-            size_t v = lower.find(L"vid_");
-            size_t p = lower.find(L"pid_");
-            if (v != std::wstring::npos) c.vid = (USHORT)wcstoul(lower.c_str() + v + 4, nullptr, 16);
-            if (p != std::wstring::npos) c.pid = (USHORT)wcstoul(lower.c_str() + p + 4, nullptr, 16);
-            if (!c.vid || !c.pid) continue;
+            // Preserve collections locked by a vendor app when their path identifies the product.
+            if (!coll.vid || !coll.pid) return false;
         }
-        size_t mi = lower.find(L"&mi_");
-        if (mi != std::wstring::npos) c.iface = (int)wcstol(lower.c_str() + mi + 4, nullptr, 16);
-        out.push_back(std::move(c));
+        return true;
     }
-    SetupDiDestroyDeviceInfoList(di);
-    return out;
+
+    void End() {
+        SetupDiDestroyDeviceInfoList(devices_);
+        devices_ = INVALID_HANDLE_VALUE;
+    }
+
+private:
+    GUID guid_{};
+    HDEVINFO devices_ = INVALID_HANDLE_VALUE;
+};
+}  // namespace
+
+HidInventory EnumHidInventory() {
+    WindowsHidInventory adapter;
+    return hid_inventory::Scan(adapter);
+}
+
+std::vector<HidColl> EnumHid() {
+    return EnumHidInventory().colls;
 }
 
 // ---- HidDev -----------------------------------------------------------------------------------

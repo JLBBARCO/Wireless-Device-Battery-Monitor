@@ -25,7 +25,10 @@ struct HIDP_CAPS {
 #endif
 
 #include <initializer_list>
+#include <cwctype>
+#include <set>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "devices.h"
@@ -36,6 +39,7 @@ struct HidColl {
     USHORT vid = 0, pid = 0, version = 0;
     int iface = -1;  // USB interface number (MI_xx in the path), -1 when unknown
     HIDP_CAPS caps{};
+    std::wstring transportId;  // physical container, or a conservative current-instance path fallback
     USHORT page() const { return caps.UsagePage; }
     USHORT usage() const { return caps.Usage; }
     USHORT inLen() const { return caps.InputReportByteLength; }
@@ -44,6 +48,61 @@ struct HidColl {
 };
 
 std::vector<HidColl> EnumHid();
+
+// Presence is recorded before a handle is opened: query permissions and report
+// capabilities cannot turn an enumerated receiver into a removed receiver.
+struct HidInventory {
+    std::vector<HidColl> colls;
+    std::vector<HidColl> paths;  // every resolved interface, including unopenable ones
+    std::set<std::wstring> presentTransports;
+    bool complete = false;
+};
+
+namespace hid_inventory {
+enum class Step { Found, Skipped, Finished, Failed };
+
+inline std::wstring Lower(std::wstring text) {
+    for (auto& ch : text) ch = static_cast<wchar_t>(towlower(ch));
+    return text;
+}
+
+inline bool HasContainerIdentity(const std::wstring& container) {
+    return !container.empty() && container != L"{00000000-0000-0000-0000-000000000000}";
+}
+
+// Adapter.Next resolves only the interface path and container. Adapter.Load may
+// then inspect attributes/caps, but its failure does not erase presence evidence.
+template <typename Adapter>
+HidInventory Scan(Adapter& adapter) {
+    HidInventory out;
+    if (!adapter.Begin()) return out;
+    out.complete = true;
+    for (unsigned index = 0;; ++index) {
+        HidColl coll;
+        std::wstring container;
+        Step step = adapter.Next(index, coll, container);
+        if (step == Step::Finished) break;
+        if (step == Step::Failed) { out.complete = false; break; }
+        if (step == Step::Skipped) { out.complete = false; continue; }
+        if (coll.path.empty()) { out.complete = false; continue; }
+        if (HasContainerIdentity(container)) coll.transportId = L"container:" + Lower(container);
+        else {
+            coll.transportId = L"path:" + Lower(coll.path);
+            // A fallback cannot prove that a previously seen container vanished.
+            out.complete = false;
+        }
+        out.paths.push_back(coll);
+        out.presentTransports.insert(coll.transportId);
+        if (adapter.Load(coll)) out.colls.push_back(std::move(coll));
+    }
+    adapter.End();
+    return out;
+}
+}  // namespace hid_inventory
+
+#ifdef _WIN32
+HidInventory EnumHidInventory();
+#endif
 
 class HidDev {
 public:

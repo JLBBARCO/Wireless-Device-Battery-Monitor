@@ -25,6 +25,7 @@
 #include "device_aliases.h"
 #include "alert_rules.h"
 #include "devices.h"
+#include "battery_state.h"
 #include "battery_history.h"
 #include "charge_estimate.h"
 #include "i18n.h"
@@ -145,13 +146,24 @@ struct TrayEntry {
     bool shortWarned = false;  // "charge today" already shown during this discharge
     charge::Tracker charge;    // readings of the current charge, for "full in ~40 min"
     std::wstring iconSig;    // what the current icon shows, to avoid needless redraws
+    std::wstring presentationSig;
     HICON icon = nullptr;
     ChargeRecord chargeRecord;  // battery tracking (PR #3648)
     bool chargeLoaded = false;
 };
 std::map<std::wstring, TrayEntry> g_entries;
+std::map<std::wstring, battery_state::Reading> g_readings;
+std::uint64_t g_appliedSequence = 0;
+
+battery_state::View ViewFor(const TrayEntry& e) {
+    const auto found = g_readings.find(e.st.key);
+    const battery_state::Reading empty;
+    return battery_state::Resolve(e.st, found == g_readings.end() ? empty : found->second,
+                                  GetTickCount64(), g_pollIntervalMs, g_dimSleeping);
+}
 std::vector<std::wstring> g_unsupported;  // seen wireless mice / keyboards without a battery driver, menu only (PR #2463)
 std::map<std::wstring, bool> g_alertLatches;  // survive transient removal of a device
+std::set<std::wstring> g_resetTrackingKeys;  // do not reload tracking from a removed session binding
 bool g_alertIconAdded = false;  // short-lived tray icon for widget-mode notifications
 bool g_placeholder = false;
 HICON g_placeholderIcon = nullptr;
@@ -178,7 +190,8 @@ void TrackCharge(TrayEntry& e, const DeviceStatus& s, ULONGLONG sampleMs) {
     ChargeRecord before = r;
     bool awake = s.connected && !s.asleep && s.percent >= 0;
     if (s.charging || s.full || !r.since || (awake && r.lastPct >= 0 && s.percent >= r.lastPct + 10)) {
-        r.since = NowSec();
+        r.since = s.rawReportPolicy && s.reportSeconds > 0
+            ? static_cast<ULONGLONG>(s.reportSeconds) + 11644473600ULL : NowSec();
         r.awakeSec = 0;
     } else if (awake) {
         r.awakeSec += sampleMs / 1000;
@@ -375,12 +388,8 @@ void SaveOrder() {
 }
 
 bool IsEntryHidden(const TrayEntry& e) {
-    if (IsHidden(e.st.key)) return true;
-    // An explicitly offline device is not just a stale battery reading.
-    if (g_showDisconnectedDevices && !e.st.connected) return false;
-    // A mouse sleeps between uses; its last level stays useful (PR #1422, opt-in).
-    if (g_hideLastKnown && g_keepMouseLastKnown && e.st.kind == DeviceKind::Mouse && e.lastPct >= 0) return false;
-    return g_hideLastKnown && (e.st.asleep || (e.st.percent < 0 && e.lastPct >= 0));
+    return battery_state::Hidden(ViewFor(e), e.st.kind, e.lastPct >= 0, IsHidden(e.st.key),
+                                 g_showDisconnectedDevices, g_hideLastKnown, g_keepMouseLastKnown);
 }
 
 bool ShouldDim(const DeviceStatus& s) {
@@ -662,15 +671,15 @@ Rgb Foreground() { return g_lightTaskbar ? Rgb{ 0, 0, 0 } : Rgb{ 255, 255, 255 }
 Accent AccentFor(const DeviceStatus& s) { return g_brandColors ? BrandOf(s) : Accent::None; }
 
 // glyph != 0: the device's symbol with the level as the bar, instead of the number (option, PR #1632).
-HICON IconFor(int pct, bool charging, bool dim, Accent accent, wchar_t glyph = 0) {
+HICON IconFor(int pct, bool charging, bool dim, Accent accent, bool live, wchar_t glyph = 0) {
     Rgb fg = Foreground();
     BrandColor bc = AccentColor(accent, g_lightTaskbar);
     Rgb bar = charging        ? Rgb{ 0, 170, 255 }
-            : pct <= LOW_BATTERY ? Rgb{ 232, 32, 48 }
-            : pct <= 30       ? Rgb{ 255, 150, 0 }
+            : live && pct <= LOW_BATTERY ? Rgb{ 232, 32, 48 }
+            : live && pct <= 30       ? Rgb{ 255, 150, 0 }
             : accent != Accent::None ? Rgb{ bc.r, bc.g, bc.b }
                               : Rgb{ 30, 190, 90 };
-    Rgb text = (!charging && pct >= 0 && pct <= LOW_BATTERY) ? Rgb{ 240, 50, 60 } : fg;
+    Rgb text = (live && !charging && pct >= 0 && pct <= LOW_BATTERY) ? Rgb{ 240, 50, 60 } : fg;
     if (glyph) return RenderIcon(std::wstring(1, glyph), pct, fg, bar, dim, true);
     std::wstring t = pct < 0 ? L"?" : std::to_wstring(pct);
     return RenderIcon(t, pct, text, bar, dim);
@@ -694,55 +703,66 @@ std::wstring ApproxMinutes(int mins) {
 
 // How old the last confirmed reading is (PR #2143), never counting failed polls.
 std::wstring FreshnessText(const TrayEntry& e) {
-    if (!e.lastReadingTick) return L"";
-    ULONGLONG now = GetTickCount64(), age = reading_freshness::AgeMinutes(e.lastReadingTick, now);
+    const auto view = ViewFor(e);
+    if (!view.readingTick) return L"";
+    ULONGLONG now = GetTickCount64(), age = reading_freshness::AgeMinutes(view.readingTick, now);
     std::wstring ago = age == 0 ? std::wstring(T(L"just now"))
                      : age < 60 ? TF(L"{count} min ago", { { L"count", std::to_wstring(age) } })
                      : age < 1440 ? TF(L"{count} h ago", { { L"count", std::to_wstring(age / 60) } })
                                   : TF(L"{count} d ago", { { L"count", std::to_wstring(age / 1440) } });
-    switch (reading_freshness::Classify(e.lastReadingTick, now, g_pollIntervalMs)) {
-        case reading_freshness::State::Fresh: return TF(L"Last reading: {age}", { { L"age", ago } });
-        case reading_freshness::State::Delayed: return TF(L"Delayed reading: {age}", { { L"age", ago } });
-        case reading_freshness::State::Stale: return TF(L"Stale reading: {age}", { { L"age", ago } });
+    return TF(L"Last received: {age}", { { L"age", ago } });
+}
+
+std::wstring ReasonText(battery_state::Reason reason) {
+    switch (reason) {
+        case battery_state::Reason::SleepReported: return T(L"Sleeping");
+        case battery_state::Reason::NoResponse: return T(L"No recent response");
+        case battery_state::Reason::Unavailable: return T(L"Battery temporarily unavailable");
+        case battery_state::Reason::QueryFailed: return T(L"Battery read failed");
+        case battery_state::Reason::InvalidResponse: return T(L"Invalid battery response");
+        case battery_state::Reason::NotYetRead: return T(L"Waiting for first battery reading");
+        case battery_state::Reason::ReadingAged: return T(L"Reading aged");
+        case battery_state::Reason::Disconnected: return T(L"off / not connected");
         default: return L"";
     }
 }
 
-bool IsStale(const TrayEntry& e) {
-    return reading_freshness::Classify(e.lastReadingTick, GetTickCount64(), g_pollIntervalMs) ==
-           reading_freshness::State::Stale;
-}
-
 std::wstring StatusText(const TrayEntry& e) {
     const auto& s = e.st;
-    if (!s.connected) {
+    const auto view = ViewFor(e);
+    if (view.state == battery_state::State::Disconnected) {
         std::wstring off = T(L"off / not connected");
         if (e.lastReadingTick) off += L", " + FreshnessText(e);
         return off;
     }
     std::wstring t;
-    if (!s.levelText.empty() && s.percent >= 0) t = T(s.levelText);
-    else if (s.percent >= 0) t = std::to_wstring(s.percent) + L"%";
-    else if (e.lastPct >= 0) t = TF(L"{percent}% (last known)", { { L"percent", std::to_wstring(e.lastPct) } });
-    else t = T(L"unknown");
-    if (!s.detail.empty() && s.percent >= 0) t += L" (" + s.detail + L")";
-    if (s.full || (s.charging && s.percent >= 100)) t += std::wstring(L", ") + T(L"fully charged");
-    else if (int mins = s.charging ? charge::MinutesToFull(e.charge, (int64_t)time(nullptr)) : -1; mins > 0)
+    if (view.state == battery_state::State::LastKnown)
+        t = TF(L"Last known: {percent}%", { { L"percent", std::to_wstring(view.percent) } });
+    else if (view.live && !s.levelText.empty()) t = T(s.levelText);
+    else if (view.percent >= 0) t = std::to_wstring(view.percent) + L"%";
+    else t = L"?";
+    const auto reason = ReasonText(view.reason);
+    if (!reason.empty()) t += L", " + reason;
+    if (view.state == battery_state::State::Unknown && view.reason != battery_state::Reason::NotYetRead)
+        t += std::wstring(L", ") + T(L"No previous reading");
+    if (view.readingTick) t += L", " + FreshnessText(e);
+    if (view.live && !s.detail.empty()) t += L" (" + s.detail + L")";
+    if (view.full) t += std::wstring(L", ") + T(L"fully charged");
+    else if (int mins = view.charging ? charge::MinutesToFull(e.charge, (int64_t)time(nullptr)) : -1; mins > 0)
         t += std::wstring(L", ") + T(L"charging") + L", " + TF(L"full in {time}", { { L"time", ApproxMinutes(mins) } });
-    else if (s.charging) t += std::wstring(L", ") + T(L"charging");
-    if (s.asleep) t += std::wstring(L", ") + T(L"asleep");
-    if (!s.note.empty() && s.percent < 0) t += std::wstring(L", ") + T(s.note);
+    else if (view.charging) t += std::wstring(L", ") + T(L"charging");
+    if (!s.note.empty() && s.percent < 0 && s.outcome == BatteryOutcome::Unspecified)
+        t += std::wstring(L", ") + T(s.note);
     const ChargeRecord& c = e.chargeRecord;
-    if (c.since && !s.charging && !s.full) {
+    if (view.live && c.since && !view.charging && !view.full) {
         ULONGLONG now = NowSec(), age = now > c.since ? now - c.since : 0;
         if (g_trackSince) t += L", " + TF(L"{time} since charge", { { L"time", Duration(age) } });
         if (g_trackAwake) t += L", " + TF(L"~{time} awake", { { L"time", Duration(c.awakeSec) } });
     }
-    if (g_trackEmpty && g_recordHistory && !s.charging && !s.full) {
+    if (view.live && g_trackEmpty && g_recordHistory && !view.charging && !view.full) {
         std::wstring left = battery_history::TimeToEmpty(s.key);  // the "Battery history" estimate
         if (!left.empty()) t += L", " + TF(L"{time} to empty", { { L"time", left } });
     }
-    if (e.lastReadingTick) t += L", " + FreshnessText(e);
     return t;
 }
 
@@ -828,10 +848,13 @@ void UpdatePlaceholder() {
     }
     bool any = false;
     for (auto& [k, e] : g_entries) any |= e.added;
-    if (!any && !g_placeholder) {
+    static std::wstring placeholderText;
+    const auto text = std::wstring(L"BatteryHub\n") +
+        T(g_appliedSequence ? L"No devices with battery info found" : L"Waiting for first battery reading");
+    if (!any && (!g_placeholder || placeholderText != text)) {
         if (!g_placeholderIcon) g_placeholderIcon = RenderIcon(L"-", -1, Foreground(), Foreground(), true);
-        g_placeholder = TrayShow(false, PLACEHOLDER_ID, g_placeholderIcon,
-                                 std::wstring(L"BatteryHub\n") + T(L"No devices with battery info found"));
+        g_placeholder = TrayShow(g_placeholder, PLACEHOLDER_ID, g_placeholderIcon, text);
+        placeholderText = text;
     } else if (any && g_placeholder) {
         TrayDelete(PLACEHOLDER_ID);
         g_placeholder = false;
@@ -840,23 +863,25 @@ void UpdatePlaceholder() {
 
 void ApplyEntry(TrayEntry& e) {
     const auto& s = e.st;
+    const auto view = ViewFor(e);
+    e.presentationSig = StatusText(e) + (view.dim ? L"|dim" : L"|bright");
     bool visible = !g_useWidget && !IsEntryHidden(e) && (s.connected || g_showDisconnectedDevices);
     if (!visible) {
         if (e.added) { TrayDelete(e.uid); e.added = false; }
         return;
     }
     // Never display an old percentage as a live reading for an explicitly offline device.
-    int shown = !s.connected ? -1 : (s.percent >= 0 ? s.percent : e.lastPct);
-    bool dim = ShouldDim(s) || IsStale(e);  // a stale reading is not shown as live (PR #2143)
+    int shown = view.percent;
+    bool dim = view.dim;
     // Fully charged on power: the normal green bar instead of the blue charging one.
-    bool charging = s.connected && !s.asleep && s.charging && !s.full && shown < 100;
+    bool charging = view.charging && !view.full && shown < 100;
     Accent accent = AccentFor(s);
-    std::wstring sig = std::to_wstring(shown) + (charging ? L"c" : L"") + (dim ? L"d" : L"") + (g_lightTaskbar ? L"l" : L"k") +
+    std::wstring sig = std::to_wstring(shown) + (view.live ? L"v" : L"h") + (charging ? L"c" : L"") + (dim ? L"d" : L"") + (g_lightTaskbar ? L"l" : L"k") +
                        L"a" + std::to_wstring((int)accent) + (s.connected ? L"|on" : L"|off") +
                        (g_trayDeviceIcons ? L"|g" + std::to_wstring((int)s.kind) + (s.via == L"Bluetooth" ? L"b" : L"") : L"");
     if (sig != e.iconSig || !e.icon) {
         if (e.icon) DestroyIcon(e.icon);
-        e.icon = s.connected ? IconFor(shown, charging, dim, accent,
+        e.icon = s.connected ? IconFor(shown, charging, dim, accent, view.live,
                                        g_trayDeviceIcons ? widget::DeviceGlyph(s.kind, s.via == L"Bluetooth") : 0)
                              : RenderIcon(L"\u00D7", -1, Foreground(), Foreground(), true);
         e.iconSig = sig;
@@ -903,7 +928,7 @@ std::vector<TrayEntry*> OrderedEntries(bool shownOnly) {
 void UpdateStatusSnapshot();
 
 void UpdateWidget() {
-    if (!g_useWidget || !widget::Alive()) return;  // not alive while the strip is swapped for the tray
+    if (!g_useWidget || !widget::Alive()) { UpdateStatusSnapshot(); return; }
     std::vector<TrayEntry*> list = OrderedEntries(true);
     // Two devices of one kind share an icon: give each a tiny caption so they can be told apart.
     std::vector<LabelInput> labelIn;
@@ -914,10 +939,11 @@ void UpdateWidget() {
     for (auto* e : list) {
         WidgetItem it;
         it.kind = e->st.kind;
-        bool offline = !e->st.connected;
-        it.percent = offline ? -1 : (e->st.percent >= 0 ? e->st.percent : e->lastPct);
+        const auto view = ViewFor(*e);
+        bool offline = view.state == battery_state::State::Disconnected;
+        it.percent = view.percent;
         if (offline) it.text = L"\u00D7";  // clear status, not a stale percentage
-        else if (e->st.percent >= 0) {
+        else if (view.live) {
             // Never present a prediction as a live measurement for asleep, charging or full devices.
             if (g_runtimeWidget && g_recordHistory && !e->st.asleep &&
                 !e->st.charging && !e->st.full)
@@ -925,10 +951,11 @@ void UpdateWidget() {
             // Insufficient, stale or otherwise unavailable estimates keep the normal battery readout.
             if (it.text.empty()) it.text = T(e->st.levelText);
         }
-        it.charging = !offline && !e->st.asleep && e->st.charging;
-        it.full = !offline && (e->st.full || (e->st.charging && it.percent >= 100));
-        it.dim = ShouldDim(e->st) || IsStale(*e);
-        it.low = !offline && !it.charging && it.percent >= 0 && it.percent <= LOW_BATTERY;
+        it.charging = view.charging;
+        it.live = view.live;
+        it.full = view.full;
+        it.dim = view.dim;
+        it.low = view.live && !it.charging && it.percent >= 0 && it.percent <= LOW_BATTERY;
         it.bluetooth = e->st.via == L"Bluetooth";
         it.wirelessLink = !offline && e->st.via.rfind(L"2.4 GHz", 0) == 0;
         it.label = labels[items.size()];
@@ -938,15 +965,17 @@ void UpdateWidget() {
             std::vector<std::wstring> parts;
             if (offline) parts.push_back(T(L"off / not connected"));
             else {
-                if (!e->st.detail.empty() && e->st.percent >= 0) parts.push_back(e->st.detail);
+                if (view.live && !e->st.detail.empty()) parts.push_back(e->st.detail);
+                if (view.state == battery_state::State::LastKnown) parts.push_back(T(L"Last known"));
+                const auto reason = ReasonText(view.reason);
+                if (!reason.empty()) parts.push_back(reason);
                 if (it.full) parts.push_back(T(L"fully charged"));
                 else if (it.charging) parts.push_back(T(L"charging"));
-                if (e->st.asleep) parts.push_back(T(L"asleep"));
             }
             for (const auto& p : parts) it.status += (it.status.empty() ? L"" : L", ") + p;
             if (!it.status.empty()) it.status[0] = towupper(it.status[0]);
         }
-        if (!offline && !e->st.charging) {
+        if (view.live && !view.charging && !view.full) {
             it.hoursLeft = battery_history::HoursRemaining(e->st.key);
             it.hoursLeftText = battery_history::RemainingText(e->st.key);
             if (it.hoursLeft < 0) {  // not enough for the estimate yet: a rough one, marked as approximate
@@ -957,13 +986,15 @@ void UpdateWidget() {
             if (!it.hoursLeftText.empty()) it.info.push_back(std::wstring(T(L"Estimated time to empty")) + L": " + it.hoursLeftText);
         }
         if (!e->st.via.empty() && e->st.via != L"demo") it.info.push_back(T(e->st.via));
+        if (view.readingTick) it.info.push_back(FreshnessText(*e));
         if (g_hoverCard && g_hoverChart && g_recordHistory)
             for (const auto& pt : battery_history::Recent(e->st.key, 24)) it.trend.push_back({ pt.secondsAgo, pt.percent });
         items.push_back(it);
         if (!tip.empty()) tip += L"\n";
         tip += DisplayName(*e) + L": " + StatusText(*e);
     }
-    if (tip.empty()) tip = std::wstring(L"BatteryHub: ") + T(L"No devices with battery info found");
+    if (tip.empty()) tip = std::wstring(L"BatteryHub: ") +
+        T(g_appliedSequence ? L"No devices with battery info found" : L"Waiting for first battery reading");
     widget::SetItems(items, tip);
     UpdateStatusSnapshot();
 }
@@ -971,7 +1002,8 @@ void UpdateWidget() {
 // %LOCALAPPDATA%\WirelessBattery\status.json for external tools (PR #378: YASB, Rainmeter, scripts): the
 // devices the widget shows, in its order and with its hiding rules, rewritten whenever they change and
 // deleted on exit. Its document format is its own (see docs/yasb.md); `--json` keeps its array format.
-StatusDevice ToStatus(const DeviceStatus& s, int lastPct) {
+StatusDevice ToStatus(const TrayEntry& e) {
+    const auto& s = e.st;
     StatusDevice d;
     d.key = s.key;
     d.name = s.name;
@@ -980,84 +1012,91 @@ StatusDevice ToStatus(const DeviceStatus& s, int lastPct) {
     d.levelText = s.levelText;
     d.kind = s.kind;
     d.percent = s.percent;
-    d.lastPct = lastPct;
+    d.lastPct = e.lastPct;
     d.millivolts = s.millivolts;
     d.charging = s.charging;
     d.asleep = s.asleep;
     d.connected = s.connected;
+    d.viewResolved = true;
+    d.view = ViewFor(e);
+    d.readingAgeSeconds = d.view.readingTick
+        ? static_cast<std::int64_t>(reading_freshness::AgeMs(d.view.readingTick, GetTickCount64()) / 1000) : -1;
     return d;
 }
 
 void UpdateStatusSnapshot() {
     if (g_demo) return;
     std::vector<StatusDevice> devices;
-    for (auto* e : OrderedEntries(true)) devices.push_back(ToStatus(e->st, e->lastPct));
+    for (auto* e : OrderedEntries(true)) devices.push_back(ToStatus(*e));
     WriteStatusSnapshot(devices, "snapshot", LOW_BATTERY);
 }
 
 void Reconcile();
 
-// Last percentage read while NOT charging, per device name (the name, not the key: a device moved
-// from its receiver to a cable gets a new key). Some devices restart their charge estimate when a
-// cable goes in -- a Logitech G502 X reports ~50% at first and only reaches its real 70-something
-// after a while -- but a battery does not drop while charging, so until the reading catches up the
-// last value from before charging is shown.
-struct IdleReading { int pct; ULONGLONG at; };
-std::map<std::wstring, IdleReading> g_idlePct;
-constexpr ULONGLONG kIdlePctMaxAgeMs = 12ull * 60 * 60 * 1000;
+// Retain legacy charging smoothing, including the G502 X workaround. Raw-report
+// paths bypass it in the shared production policy.
+battery_state::ChargeSmoother g_chargeSmoother;
 
-void SmoothCharging(DeviceStatus& s) {
-    if (s.percent < 0 || s.name.empty() || s.name.find(L"wireless device") != std::wstring::npos) return;
-    ULONGLONG now = GetTickCount64();
-    if (!s.charging) {
-        g_idlePct[s.name] = { s.percent, now };
-        return;
-    }
-    auto it = g_idlePct.find(s.name);
-    if (it == g_idlePct.end() || now - it->second.at > kIdlePctMaxAgeMs) return;
-    if (s.percent < it->second.pct) {
-        s.percent = it->second.pct;
-        s.levelText.clear();
-    } else {
-        g_idlePct.erase(it);  // caught up: the device's own reading is trusted again
-    }
-}
-
-void OnResults(std::vector<DeviceStatus>& results) {
+void OnResults(DevicePollSnapshot& snapshot) {
+    if (!battery_state::AcceptSnapshot(g_appliedSequence, snapshot.sequence)) return;
+    auto& results = snapshot.devices;
     g_unsupported.clear();
     results.erase(std::remove_if(results.begin(), results.end(), [](const DeviceStatus& s) {
                       if (s.unsupported) g_unsupported.push_back(s.name);
                       return s.unsupported;
                   }), results.end());
-    for (auto& s : results) SmoothCharging(s);
+    for (auto& s : results) g_chargeSmoother.Apply(s, GetTickCount64());
     std::map<std::wstring, bool> seen;
+    std::set<std::wstring> unresolvedTransports;
     ULONGLONG tick = GetTickCount64();
     ULONGLONG sampleMs = g_lastPollTick ? std::min<ULONGLONG>(tick - g_lastPollTick, g_pollIntervalMs) : 0;
     g_lastPollTick = tick;
     for (auto& s : results) {
+        auto cached = g_readings.find(s.key);
+        // A partial identity lookup cannot replace a trusted binding with an
+        // unidentified result. Its existing entry follows the missing-result path.
+        if (battery_state::AmbiguousSlot(s, g_readings) ||
+            (cached != g_readings.end() && !battery_state::CanApply(s, cached->second))) {
+            unresolvedTransports.insert(s.transportId.empty() && cached != g_readings.end()
+                ? cached->second.transport : s.transportId);
+            continue;
+        }
         auto& e = g_entries[s.key];
         if (!e.uid) e.uid = StableId(s.key);
-        const int previousPercent = e.st.connected && !e.st.asleep ? e.st.percent : -1;  // the last fresh reading
+        if (g_resetTrackingKeys.erase(s.key)) e.chargeLoaded = true;
+        const int previousPercent = ViewFor(e).live ? e.st.percent : -1;
+        auto& reading = g_readings[s.key];
+        const auto observation = battery_state::Observe(reading, s, tick);
+        if (observation.bindingChanged) {
+            e.lowWarned = e.limitWarned = e.shortWarned = false;
+            e.charge = charge::Tracker{};
+            e.chargeRecord = ChargeRecord{};
+            e.chargeLoaded = true;  // never load a prior binding's persisted tracking
+            g_alertLatches.erase(s.key);
+        }
         e.st = s;
-        e.lastPct = RememberedPercent(s, e.lastPct);
-        if (reading_freshness::Confirmed(s.percent, s.connected, s.asleep)) e.lastReadingTick = GetTickCount64();
-        e.lastSeen = GetTickCount64();
+        e.lastPct = battery_state::SameBinding(s, reading) ? reading.percent : -1;
+        e.lastReadingTick = battery_state::SameBinding(s, reading) ? reading.tick : 0;
+        e.lastSeen = tick;
+        const bool currentSample = battery_state::CanMeasure(s, reading, observation, tick, g_pollIntervalMs);
         seen[s.key] = true;
         // Evaluate even in widget mode: ApplyEntry only manages tray icons.
         // Alert latches are kept by stable device key even if the driver briefly stops reporting it.
         if (const auto it = g_alertLatches.find(s.key); it != g_alertLatches.end())
             e.lowWarned = it->second;
-        bool notify = !IsHidden(s.key) &&
+        bool notify = currentSample && !IsHidden(s.key) &&
                       alerts::ShouldNotify(s, alerts::EffectiveThreshold(g_alertOverrides, s.key), e.lowWarned);
         g_alertLatches[s.key] = e.lowWarned;
         if (g_alertLatches.size() > 256) g_alertLatches.erase(g_alertLatches.begin());
-        if (g_recordHistory && s.connected && !s.asleep && s.percent >= 0)
-            battery_history::Observe(s.key, s.percent, s.charging);
-        bool limit = !IsHidden(s.key) && alerts::ShouldNotifyChargeLimit(s, g_chargeLimit, previousPercent, e.limitWarned);
-        if (s.connected && !s.asleep) charge::Observe(e.charge, s.charging, s.percent, (int64_t)time(nullptr));
+        if (g_recordHistory && currentSample)
+            battery_history::Observe(s.key, s.percent, s.charging, s.rawReportPolicy ? s.reportSeconds : 0);
+        bool limit = currentSample && !observation.bindingChanged && !IsHidden(s.key) &&
+                     alerts::ShouldNotifyChargeLimit(s, g_chargeLimit, previousPercent, e.limitWarned);
+        if (currentSample) charge::Observe(e.charge, s.charging, s.percent,
+            s.rawReportPolicy && s.reportSeconds > 0 ? s.reportSeconds : (int64_t)time(nullptr));
         bool shortRuntime = false;
         std::wstring left;
-        if (g_shortRuntimeAlert && !notify && !IsHidden(s.key) && s.connected && !s.asleep && s.percent >= 0) {
+        if (currentSample && g_shortRuntimeAlert && !notify && !IsHidden(s.key)) {
             int threshold = alerts::EffectiveThreshold(g_alertOverrides, s.key);
             double hours = s.charging ? -1 : battery_history::HoursRemaining(s.key);
             if (threshold != alerts::kDisabled &&
@@ -1065,10 +1104,10 @@ void OnResults(std::vector<DeviceStatus>& results) {
                 shortRuntime = true;
                 left = battery_history::RemainingText(s.key);
             }
-        } else if (s.charging) {
+        } else if (currentSample && s.charging) {
             e.shortWarned = false;
         }
-        if (!g_demo && (g_trackSince || g_trackAwake)) TrackCharge(e, s, sampleMs);
+        if (currentSample && !g_demo && (g_trackSince || g_trackAwake)) TrackCharge(e, s, sampleMs);
         ApplyEntry(e);
         if (notify) ShowBatteryAlert(e);
         else if (limit) ShowChargeLimitAlert(e);
@@ -1078,34 +1117,52 @@ void OnResults(std::vector<DeviceStatus>& results) {
     // has an entry from its receiver, which stops answering then. Generic names are not matched.
     std::set<std::wstring> liveNames;
     for (auto& s : results)
-        if (s.connected && !s.asleep && s.percent >= 0 && s.name.find(L"wireless device") == std::wstring::npos)
+        if (battery_state::Confirmed(s) && s.name.find(L"wireless device") == std::wstring::npos)
             liveNames.insert(s.name);
     for (auto it = g_entries.begin(); it != g_entries.end();) {
         auto& e = it->second;
-        // Some receivers drop sleeping devices from the link; keep showing the last value for a while
-        // (at least two poll intervals), unless the same device is answering another way (then that one
-        // is the current value).
-        bool inGrace = !seen.count(it->first) && e.st.graceSec > 0 && e.st.connected &&
-                       GetTickCount64() - e.lastSeen <
-                           std::max<ULONGLONG>((ULONGLONG)e.st.graceSec * 1000, 2ULL * g_pollIntervalMs) &&
-                       !liveNames.count(e.st.name);
-        if (inGrace) {
+        if (seen.count(it->first)) { ++it; continue; }
+        const auto cached = g_readings.find(it->first);
+        const battery_state::Reading empty;
+        const auto& reading = cached == g_readings.end() ? empty : cached->second;
+        const auto missing = battery_state::Missing(e.st, reading, snapshot, e.lastSeen, tick,
+                                                    g_pollIntervalMs, liveNames.count(e.st.name) != 0);
+        if (missing == battery_state::MissingAction::KeepBound || missing == battery_state::MissingAction::KeepGrace) {
             e.st.percent = -1;
-            e.st.asleep = true;
+            e.st.asleep = false;
+            e.st.charging = e.st.full = false;
+            e.st.outcome = missing == battery_state::MissingAction::KeepBound
+                ? (unresolvedTransports.count(reading.transport) ? BatteryOutcome::QueryFailed
+                   : battery_state::MissingOutcome(reading, snapshot)) : BatteryOutcome::NoResponse;
             ApplyEntry(e);
-        }
-        if (!seen.count(it->first) && !inGrace) {
-            if (it->second.added) TrayDelete(it->second.uid);
-            if (it->second.icon) DestroyIcon(it->second.icon);
-            it = g_entries.erase(it);
-        } else {
             ++it;
+        } else {
+            if (e.added) TrayDelete(e.uid);
+            if (e.icon) DestroyIcon(e.icon);
+            g_readings.erase(it->first);
+            if (missing == battery_state::MissingAction::Invalidate) {
+                g_alertLatches.erase(it->first);
+                g_resetTrackingKeys.insert(it->first);
+                if (g_resetTrackingKeys.size() > 256) g_resetTrackingKeys.erase(g_resetTrackingKeys.begin());
+            }
+            it = g_entries.erase(it);
         }
     }
     Reconcile();  // react to the new device list now, not at the next timer tick
     UpdatePlaceholder();
     UpdateWidget();
     memory_trim::Soon();  // the poll (HID, Bluetooth, drivers) is done: give its pages back until the next one
+}
+
+// Presentation-only timer: no measurement, alert or hardware side effects.
+void RefreshReadingViews() {
+    bool changed = false;
+    for (auto& [key, e] : g_entries) {
+        const auto view = ViewFor(e);
+        const auto signature = StatusText(e) + (view.dim ? L"|dim" : L"|bright");
+        if (signature != e.presentationSig) { ApplyEntry(e); changed = true; }
+    }
+    if (changed) { UpdatePlaceholder(); UpdateWidget(); }
 }
 
 bool NothingShown() {
@@ -1579,7 +1636,7 @@ void ShowMenu() {
     UINT emptyFlags = MF_STRING | (g_trayWhenEmpty ? MF_CHECKED : 0) | (g_wantWidget ? 0 : MF_GRAYED);
     AppendMenuW(display, emptyFlags, ID_TRAY_WHEN_EMPTY, T(L"Move to tray when no devices"));
     AppendMenuW(display, MF_STRING | (g_showDisconnectedDevices ? MF_CHECKED : 0), ID_SHOW_DISCONNECTED, T(L"Show disconnected devices"));
-    AppendMenuW(display, MF_STRING | (g_dimSleeping ? MF_CHECKED : 0), ID_DIM_SLEEPING, T(L"Dim sleeping devices"));
+    AppendMenuW(display, MF_STRING | (g_dimSleeping ? MF_CHECKED : 0), ID_DIM_SLEEPING, T(L"Dim last known readings"));
     AppendMenuW(m, MF_POPUP, (UINT_PTR)display, T(L"Display settings"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
@@ -1876,14 +1933,14 @@ void RefreshBluetoothRadioWatches() {
 std::set<std::wstring> AwakeDevices() {
     std::set<std::wstring> keys;
     for (const auto& [k, e] : g_entries)
-        if (e.st.connected && !e.st.asleep) keys.insert(k);
+        if (ViewFor(e).live) keys.insert(k);
     return keys;
 }
 
 std::set<std::wstring> DevicesWithLevel() {
     std::set<std::wstring> keys;
     for (const auto& [k, e] : g_entries)
-        if (e.st.connected && e.st.percent >= 0) keys.insert(k);
+        if (ViewFor(e).live) keys.insert(k);
     return keys;
 }
 
@@ -1909,8 +1966,12 @@ DWORD WINAPI Worker(LPVOID) {
         if (request == refresh_policy::Mode::Resume) monitor.BeginResume(std::move(keys));
         else if (request == refresh_policy::Mode::Arrival) monitor.BeginArrival(std::move(keys));
 
-        auto* v = new std::vector<DeviceStatus>(g_demo ? DemoDevices() : PollAllDevices());
-        DWORD delay = monitor.DelayAfterPoll(*v, g_pollIntervalMs);
+        auto* v = new DevicePollSnapshot;
+        if (g_demo) {
+            v->devices = DemoDevices();
+            v->sequence = GetTickCount64();
+        } else *v = PollDevicesSnapshot();
+        DWORD delay = monitor.DelayAfterPoll(v->devices, g_pollIntervalMs);
         if (!PostMessageW(g_hwnd, WM_RESULTS, 0, (LPARAM)v)) delete v;
         DWORD wait = WaitForMultipleObjects(2, events, FALSE, delay);
         if (wait == WAIT_OBJECT_0) return 0;
@@ -1933,7 +1994,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     }
     switch (msg) {
         case WM_RESULTS: {
-            auto* v = reinterpret_cast<std::vector<DeviceStatus>*>(lp);
+            auto* v = reinterpret_cast<DevicePollSnapshot*>(lp);
             OnResults(*v);
             delete v;
             return 0;
@@ -2010,7 +2071,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 g_awakeBeforeSleep.clear();
                 SetEvent(g_refreshEvt);
             }
-            if (wp == TIMER_WIDGET) { Reconcile(); updates::Tick(h); }
+            if (wp == TIMER_WIDGET) { Reconcile(); RefreshReadingViews(); updates::Tick(h); }
             if (wp == TIMER_ALERT_ICON) {
                 KillTimer(h, TIMER_ALERT_ICON);
                 if (g_alertIconAdded) { TrayDelete(ALERT_ICON_ID); g_alertIconAdded = false; }
@@ -2054,7 +2115,12 @@ std::wstring ListAsText(const std::vector<DeviceStatus>& list) {
     LoadHidden();
     LoadOrder();
     g_entries.clear();
-    for (const auto& s : list) g_entries[s.key].st = s;
+    g_readings.clear();
+    for (const auto& s : list) {
+        auto& e = g_entries[s.key];
+        e.st = s;
+        battery_state::Observe(g_readings[s.key], s, GetTickCount64());
+    }
     std::vector<WidgetItem> items;
     for (const TrayEntry* e : OrderedEntries(true)) {
         WidgetItem it;
@@ -2297,7 +2363,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
         DispatchMessageW(&m);
     }
     // drain results posted after shutdown started
-    while (PeekMessageW(&m, nullptr, WM_RESULTS, WM_RESULTS, PM_REMOVE)) delete reinterpret_cast<std::vector<DeviceStatus>*>(m.lParam);
+    while (PeekMessageW(&m, nullptr, WM_RESULTS, WM_RESULTS, PM_REMOVE)) delete reinterpret_cast<DevicePollSnapshot*>(m.lParam);
     if (notify) UnregisterDeviceNotification(notify);
     if (radioNotify) UnregisterDeviceNotification(radioNotify);
     ClearBluetoothRadioWatches();

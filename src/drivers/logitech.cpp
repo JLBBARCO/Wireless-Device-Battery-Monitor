@@ -11,6 +11,7 @@
 // github.com/Sapd/HeadsetControl (headset voltage calibration); PRO X Wireless: G HUB's power model
 // for 046D:0ABA (pro_headset/pro_x_wireless_headset_battery.xml), checked against G HUB (#3434).
 #include "drivers.h"
+#include "battery_report.h"
 
 #include <algorithm>
 #include <cwctype>
@@ -33,11 +34,14 @@ public:
         return hasShort_ || hasLong_;
     }
     bool hasLong() const { return hasLong_; }
+    bool hadIoFailure() const { return ioFailure_; }
+    BatteryOutcome requestOutcome() const { return requestOutcome_; }
 
     // Sends a request and waits for its reply. Returns 1 = reply (params in `p`), 0 = error reply
     // (code in `err`), -1 = no answer.
     int Request(BYTE idx, BYTE b2, BYTE b3, std::initializer_list<BYTE> params, std::vector<BYTE>& p, BYTE& err,
                 bool forceShort = false, int timeoutMs = 500) {
+        requestOutcome_ = BatteryOutcome::NoResponse;
         bool useLong = hasLong_ && !forceShort;
         if (!useLong && !hasShort_) return -1;
         std::vector<BYTE> msg(useLong ? 20 : 7, 0);
@@ -49,7 +53,11 @@ public:
         for (BYTE v : params) if (i < msg.size()) msg[i++] = v;
         l_.Flush();
         s_.Flush();
-        if (!(useLong ? l_ : s_).Write(msg)) return -1;
+        if (!(useLong ? l_ : s_).Write(msg)) {
+            ioFailure_ = true;
+            requestOutcome_ = BatteryOutcome::QueryFailed;
+            return -1;
+        }
 
         ULONGLONG end = GetTickCount64() + timeoutMs;
         std::vector<BYTE> r;
@@ -59,10 +67,12 @@ public:
                     if ((r[0] != 0x10 && r[0] != 0x11) || r[1] != idx) continue;
                     if (r[2] == b2 && r[3] == b3) {
                         p.assign(r.begin() + 4, r.end());
+                        requestOutcome_ = BatteryOutcome::Reported;
                         return 1;
                     }
                     if ((r[2] == 0xFF || r[2] == 0x8F) && r[3] == b2 && r[4] == b3) {
                         err = r[5];
+                        requestOutcome_ = BatteryOutcome::QueryFailed;
                         return 0;
                     }
                 }
@@ -86,6 +96,8 @@ public:
 private:
     HidDev s_, l_;
     bool hasShort_ = false, hasLong_ = false;
+    bool ioFailure_ = false;
+    BatteryOutcome requestOutcome_ = BatteryOutcome::NoResponse;
 };
 
 // Voltage -> % for a typical Li-ion cell (mice/keyboards).
@@ -132,6 +144,36 @@ DeviceKind KindFromType(BYTE t) {
 // Fills battery fields from whichever battery feature the device has. Returns false if none.
 bool ReadBattery20(Hidpp& h, BYTE idx, USHORT pid, DeviceStatus& s) {
     std::vector<BYTE> p;
+    if (IsMxMaster4ReportedName(s.name)) {
+        // Preserve only protocol percentages for this raw-report policy. Unified
+        // battery advertises SoC support in capabilities byte 1, bit 1; coarse
+        // levels and voltage/ADC estimates cannot seed a raw percentage.
+        BYTE f = h.FeatureIndex(idx, 0x1004);
+        if (!f && h.requestOutcome() != BatteryOutcome::Reported) {
+            s.outcome = h.requestOutcome();
+            return true;
+        }
+        const bool unified = f != 0;
+        if (unified) {
+            if (!h.Call(idx, f, 0, {}, p)) { s.outcome = h.requestOutcome(); return true; }
+            if (p.size() < 2) { s.outcome = BatteryOutcome::InvalidResponse; return true; }
+            if (!(p[1] & 2)) { s.outcome = BatteryOutcome::Unavailable; return true; }
+        } else {
+            f = h.FeatureIndex(idx, 0x1000);
+            if (!f) {
+                s.outcome = h.requestOutcome() == BatteryOutcome::Reported
+                                ? BatteryOutcome::Unavailable : h.requestOutcome();
+                return true;
+            }
+        }
+        if (!h.Call(idx, f, unified ? 1 : 0, {}, p)) { s.outcome = h.requestOutcome(); return true; }
+        if (p.size() < 3 || p[0] > 100) { s.outcome = BatteryOutcome::InvalidResponse; return true; }
+        s.percent = p[0];  // zero remains zero, including charging-complete replies
+        s.charging = unified ? (p[2] >= 1 && p[2] <= 3) : (p[2] >= 1 && p[2] <= 4);
+        s.full = p[2] == 3;
+        s.outcome = BatteryOutcome::Reported;
+        return true;
+    }
     if (BYTE f = h.FeatureIndex(idx, 0x1004)) {  // UNIFIED_BATTERY: get_status (fn 1)
         if (h.Call(idx, f, 1, {}, p) && p.size() >= 3) {
             int soc = p[0], level = p[1], st = p[2];
@@ -238,6 +280,7 @@ bool ReadBattery10(Hidpp& h, BYTE idx, DeviceStatus& s) {
 // instance part. Returns an empty string for a path of another shape (all such paths then share
 // one group, which is how they were polled before).
 std::wstring PhysicalKey(const HidColl& c) {
+    if (!c.transportId.empty()) return c.transportId;
     std::wstring p = c.path;
     for (auto& ch : p) ch = towlower(ch);
     size_t a = p.find(L'#');
@@ -257,8 +300,13 @@ std::wstring PhysicalKey(const HidColl& c) {
 bool PollLogitechDevice(PollContext& ctx, USHORT pid, const std::vector<const HidColl*>& shorts,
                         const std::vector<const HidColl*>& longs, const std::wstring& suffix) {
     if (shorts.empty() && longs.empty()) return false;
+    const auto& physical = *(longs.empty() ? shorts[0] : longs[0]);
     Hidpp h;
-    if (!h.Open(shorts.empty() ? nullptr : shorts[0], longs.empty() ? nullptr : longs[0])) return false;
+    if (!h.Open(shorts.empty() ? nullptr : shorts[0], longs.empty() ? nullptr : longs[0])) {
+        if (!physical.transportId.empty()) ctx.transportOutcomes[physical.transportId] = BatteryOutcome::QueryFailed;
+        return false;
+    }
+    if (!physical.transportId.empty()) ctx.transportOutcomes[physical.transportId] = BatteryOutcome::NoResponse;
 
     std::wstring product = HidProduct(longs.empty() ? *shorts[0] : *longs[0]);
     bool isReceiver = product.find(L"Receiver") != std::wstring::npos || product.find(L"USB Receiver") != std::wstring::npos;
@@ -291,6 +339,8 @@ bool PollLogitechDevice(PollContext& ctx, USHORT pid, const std::vector<const Hi
         s.via = idx == 0xFF ? L"USB / Bluetooth" : L"Logitech receiver";
         s.graceSec = idx == 0xFF ? 0 : 1800;  // receiver devices drop off the link while sleeping
         s.kind = passthrough ? DeviceKind::Mouse : GuessKind(s.name);
+        s.vid = 0x046D;
+        s.pid = pid;
 
         // Logi Bolt (BLE-based) keyboards/mice can take ~600-800 ms to wake from BLE peripheral
         // latency on the initial ping when idle, whereas empty or offline receiver slots immediately
@@ -301,7 +351,10 @@ bool PollLogitechDevice(PollContext& ctx, USHORT pid, const std::vector<const Hi
         if (r == 1 && p.size() >= 3 && p[0] >= 2) {
             ReadNameAndType20(h, idx, s);
             found = ReadBattery20(h, idx, pid, s);
+            if (found && IsMxMaster4ReportedName(s.name) && s.percent >= 0 && s.percent <= 100)
+                StampBatteryReport(s);
             std::wstring unit = found ? ReadUnitId20(h, idx) : L"";
+            ApplyMxMaster4Policy(s, (longs.empty() ? shorts[0] : longs[0])->transportId, idx, unit);
             if (!unit.empty()) {
                 s.key = L"logi:unit:" + unit;
                 // Unplugging the cable hands a receiver device back to its receiver; keep the
@@ -318,6 +371,8 @@ bool PollLogitechDevice(PollContext& ctx, USHORT pid, const std::vector<const Hi
             any = true;
         }
     }
+    if (!physical.transportId.empty() && h.hadIoFailure())
+        ctx.transportOutcomes[physical.transportId] = BatteryOutcome::QueryFailed;
     return any;
 }
 

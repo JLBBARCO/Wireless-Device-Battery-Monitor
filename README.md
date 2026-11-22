@@ -30,7 +30,11 @@ Battery levels of your wireless mouse, headset, keyboard and controller, right o
 **On the taskbar (default):** `🎧 30%  🖱 93%` next to the notification area, drawn with the Windows icon font.
 - **Low battery:** a red number means 15% or less.
 - **Charging:** a blue ⚡ appears next to the number. Once the device is fully charged and still on power, it turns into a green ✓.
-- **Asleep:** dimmed text means the device is asleep and the last known value is shown. Turn off *Dim sleeping devices* in the menu to keep that value at full brightness.
+- **Last known:** dimmed text means a previously confirmed value is shown. The
+  tooltip distinguishes reported sleep, no response, an unavailable reading,
+  and query errors; silence alone does not prove sleep. Turn off *Dim last
+  known readings* to keep historical values at full brightness. See
+  [last-known battery behavior](docs/last-known-battery.md).
 - **Disconnected (optional):** turn on *Show disconnected devices* to display a dimmed `×` for devices whose driver explicitly reports an offline wireless link. This does not infer disconnection from a missed battery poll; the default remains to hide offline devices.
 - **Two devices of one kind:** with two mice (or two controllers...) both would get the same icon, so each one gets a tiny caption of up to 3 letters in the corner of its icon, taken from its name (`MX`, `PRO`), or a number when the names do not tell them apart. A device that is alone in its kind shows no caption.
 - **Theme:** it follows light/dark mode and DPI scaling.
@@ -339,9 +343,17 @@ also accepts `--help`. `--json` prints a stable array that scripts and bar widge
   "millivolts":4029,"graceSec":1800}]
 ```
 
-`graceSec` is how long the app keeps showing the last known level while the device is asleep.
+`graceSec` is the legacy driver's retention period. The resident app retains
+confirmed readings for the verified Flow 2 and MX Master 4 bindings while the
+matching receiver remains present; this does not change the one-shot CLI
+contract.
 
-While the app runs it also keeps `%LOCALAPPDATA%\WirelessBattery\status.json` up to date (the devices the widget shows, in its order), and deletes it on exit, for status bars that read a file instead of starting the exe. See [docs/yasb.md](docs/yasb.md) for a YASB setup.
+While the app runs it also keeps `%LOCALAPPDATA%\WirelessBattery\status.json` up
+to date (the devices the widget shows, in its order), and deletes it on exit,
+for status bars that read a file instead of starting the exe. This versioned
+resident snapshot includes last-known state and receipt time; it is a different
+contract from the one-shot `--json` array. Readings are not restored across app
+restarts. See [docs/yasb.md](docs/yasb.md) for a YASB setup.
 Adding new fields is backwards compatible.
 
 **Device not shown?** Right-click the widget or tray icon and choose **Request support for a device...**. Pick the device, check
@@ -426,7 +438,12 @@ protocols. Bluetooth/UPower fallbacks, HeadsetControl and the remaining vendors 
 - **Crowded taskbars:** with a very full centered Windows 11 taskbar, the app buttons can reach the widget. On Windows 10 the task-button area is narrowed automatically.
 - **Phones:** read from a file Phone Link writes for the Start menu companion card, which is not a documented API and may change with Phone Link updates. The phone shows while Phone Link reports it as connected; a card older than 3 hours is shown dimmed. The card also says when the phone is charging, which shows as the charging bolt.
 - **Razer HyperSpeed Multi-Device:** compatible receivers can report the mouse and keyboard separately, even when one sleeps. See [receiver protocol and tested hardware](docs/razer_hyperspeed.md).
-- **Sleeping devices:** a device that is asleep may not answer. Its last value stays visible, dimmed unless *Dim sleeping devices* is turned off in the menu. Logitech receivers drop sleeping devices from the link, so their last value is kept for 30 minutes.
+- **Idle devices:** a sleeping device may not answer, but a missed response
+  does not establish sleep. Confirmed Flow 2 and MX Master 4 readings remain
+  available as last known while their verified receiver binding remains
+  present. Other drivers retain their existing retention behavior. Removal or
+  an app restart requires a fresh reading. See [last-known battery
+  behavior](docs/last-known-battery.md) for identity limits and state details.
 - **Logitech mice on the `046D:C542` receiver** (C-U0019 "Wireless Receiver", shipped with the M280 and some M185 / M190 / M220): this receiver does not speak HID++. It exposes only a standard mouse and one vendor feature report (ID 5, 7 bytes), with no HID++ short or long reports, so the Logitech driver has nothing to ask and the mouse is not listed. [Solaar](https://github.com/pwr-Solaar/Solaar/issues/1835) does not support it for the same reason, and no battery query for it is documented.
 - **HECATE G2 Wireless 7.1 headset** (2.4 GHz dongle `35BB:A009` / `A209`): no battery query for its dongle is documented yet, so it is not read. A USB capture while the HECATE software shows the headset battery (see CONTRIBUTING.md) is the way to add it.
 - **Keychron keyboards:** with stock firmware they only report their battery over Bluetooth (shown via the Bluetooth support). Over the 2.4 GHz receiver or the cable they need firmware with the battery patch ([docs/keychron_keyboard_firmware/README.md](docs/keychron_keyboard_firmware/README.md)); updating the keyboard from Keychron Launcher removes it. Keychron mice are supported.

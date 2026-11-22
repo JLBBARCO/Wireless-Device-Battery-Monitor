@@ -6,6 +6,7 @@
 
 static std::deque<std::vector<BYTE>> replies;
 static int opens, writes;
+static std::vector<std::wstring> openedTransports;
 static int readTimeoutLimit = 500;
 static ULONGLONG now;
 static bool consumeTimeouts;
@@ -14,7 +15,7 @@ static ULONGLONG TestTickCount64() { return now; }
 #include "../src/drivers/sonix.cpp"
 #undef GetTickCount64
 static bool openOk = true, writeOk = true;
-bool HidDev::Open(const HidColl& c) { ++opens; c_ = c; return openOk; }
+bool HidDev::Open(const HidColl& c) { ++opens; openedTransports.push_back(c.transportId); c_ = c; return openOk; }
 void HidDev::Close() {}
 void HidDev::Flush() {}
 bool HidDev::Write(const std::vector<BYTE>& request, int ms) {
@@ -129,8 +130,10 @@ int main() {
     assert(Poll(Collection(), {}).out.empty() && writes == 2);
     writeOk = true;
 
-    const auto flow2Via = Collection(0x388D, 0x0002, 2);
+    auto flow2Via = Collection(0x388D, 0x0002, 2);
+    flow2Via.transportId = L"container:flow2-a";
     auto flow2Receiver = Collection(0x388D, 0x0002, 0);
+    flow2Receiver.transportId = flow2Via.transportId;
     flow2Receiver.caps.UsagePage = 1;
     flow2Receiver.caps.Usage = 0;
     flow2Receiver.caps.InputReportByteLength = 64;
@@ -151,7 +154,10 @@ int main() {
     assert(receiverStatus.key == L"sonix:388D:0002" && receiverStatus.kind == DeviceKind::Keyboard);
     assert(receiverStatus.connected && receiverStatus.percent == -1);
     assert(receiverStatus.note == L"Battery unavailable" && !receiverStatus.asleep);
-    assert(receiverStatus.graceSec == 0 && !receiverStatus.retainLastPercent && writes == 2);
+    assert(receiverStatus.graceSec == 0 && receiverStatus.retainLastPercent && writes == 2);
+    assert(receiverStatus.name == L"Lofree Flow 2" && receiverStatus.rawReportPolicy);
+    assert(receiverStatus.transportId == flow2Via.transportId && !receiverStatus.cacheIdentity.empty());
+    assert(receiverStatus.outcome == BatteryOutcome::NoResponse && receiverStatus.reportTick == 0);
     assert(pollFlow2(flow2Receiver, {}).out.size() == 1 && writes == 2);
     assert(Poll(flow2Via, {}).out.empty() && opens == 0);
     assert(Poll(Collection(0x388D, 0x0002, 1), {{0x20, 1, 0, 73}}).out.empty() && opens == 0);
@@ -174,23 +180,25 @@ int main() {
         assert(reading.out.size() == 1 && reading.out[0].percent == level);
         assert(reading.out[0].connected && reading.out[0].graceSec == 0);
         assert(reading.out[0].key == receiverStatus.key && reading.out[0].note.empty());
+        assert(reading.out[0].outcome == BatteryOutcome::Reported && reading.out[0].reportTick > 0);
+        assert(reading.out[0].reportUtc.size() == 20);
         PollSonix(reading);
         assert(opens == 1 && writes == 1);  // one stable key claims both collections
     }
     auto missing = pollFlow2(flow2Receiver, {extension(0xFF, 0)});
     assert(missing.out.size() == 1 && missing.out[0].percent == -1);
     assert(missing.out[0].note == L"Battery unavailable" && missing.out[0].graceSec == 0);
+    assert(missing.out[0].outcome == BatteryOutcome::Unavailable);
 
-    // Use the same state update as the tray and widget lifecycle. An explicit
-    // unknown measurement clears Flow2's remembered percentage between polls.
+    // Unavailable measurements preserve a trusted last value without becoming new samples.
     int remembered = RememberedPercent(pollFlow2(flow2Receiver, {extension(73)}).out[0], -1);
     assert(remembered == 73);
     remembered = RememberedPercent(missing.out[0], remembered);
-    assert(remembered == -1);
+    assert(remembered == 73);
     remembered = RememberedPercent(pollFlow2(flow2Receiver, {extension(0)}).out[0], remembered);
     assert(remembered == 0);
     remembered = RememberedPercent(pollFlow2(flow2Receiver, {}).out[0], remembered);
-    assert(remembered == -1);
+    assert(remembered == 0);
     remembered = RememberedPercent(pollFlow2(flow2Receiver, {extension(100)}).out[0], remembered);
     assert(remembered == 100);
     auto legacy = Poll(Collection(), {{0x20, 1, 0, 73}}).out[0];
@@ -217,6 +225,7 @@ int main() {
         if (fault == 10) packet = extension(73, 2);
         auto rejected = pollFlow2(flow2Receiver, {packet});
         assert(rejected.out.size() == 1 && rejected.out[0].percent == -1 && writes == 2);
+        assert(rejected.out[0].outcome == BatteryOutcome::InvalidResponse);
         malformed.push_back(packet);
     }
     assert(pollFlow2(flow2Receiver, {{0x20, 1, 0, 73}}).out[0].percent == -1);
@@ -227,9 +236,13 @@ int main() {
     assert(recovered.out.size() == 1 && recovered.out[0].percent == 100 && writes == 1);
     assert(pollFlow2(flow2Receiver, {{}, extension(0)}).out[0].percent == 0 && writes == 2);
     openOk = false;
-    assert(pollFlow2(flow2Receiver, {}).out[0].percent == -1 && writes == 0);
+    auto openFailed = pollFlow2(flow2Receiver, {});
+    assert(openFailed.out[0].percent == -1 && writes == 0);
+    assert(openFailed.out[0].outcome == BatteryOutcome::QueryFailed);
     openOk = true; writeOk = false;
-    assert(pollFlow2(flow2Receiver, {}).out[0].percent == -1 && writes == 2);
+    auto writeFailed = pollFlow2(flow2Receiver, {});
+    assert(writeFailed.out[0].percent == -1 && writes == 2);
+    assert(writeFailed.out[0].outcome == BatteryOutcome::QueryFailed);
     writeOk = true;
 
     // Both attempts share four seconds, including write time and unrelated reports.
@@ -265,5 +278,38 @@ int main() {
         PollSonix(ctx);
         assert(ctx.out.empty() && opens == 0 && writes == 0);
     }
-    puts("SONiX driver tests passed (21 legacy receiver IDs and strict Flow 2 LF2-v1)");
+    // Never cross-match one receiver's MI_00 with another receiver/cable MI_02.
+    auto otherVia = flow2Via;
+    otherVia.transportId = L"container:flow2-b";
+    opens = writes = 0;
+    PollContext mismatched;
+    mismatched.colls = {flow2Receiver, otherVia};
+    PollSonix(mismatched);
+    assert(mismatched.out.empty() && opens == 0);
+    auto noIdentity = flow2Receiver;
+    noIdentity.transportId.clear();
+    PollContext unbound;
+    unbound.colls = {noIdentity, flow2Via};
+    PollSonix(unbound);
+    assert(unbound.out.empty() && opens == 0);
+
+    auto otherReceiver = flow2Receiver;
+    otherReceiver.transportId = otherVia.transportId;
+    PollContext both;
+    both.colls = {flow2Via, otherReceiver, otherVia, flow2Receiver};
+    replies = {extension(25), extension(75)};
+    openedTransports.clear();
+    PollSonix(both);
+    assert(both.out.size() == 2 && both.out[0].key != both.out[1].key);
+    assert(both.out[0].cacheIdentity != both.out[1].cacheIdentity);
+    assert(openedTransports.size() == 2 && openedTransports[0] == otherVia.transportId &&
+           openedTransports[1] == flow2Via.transportId);
+    const auto firstKey = both.out[0].key, secondKey = both.out[1].key;
+    PollContext reordered;
+    reordered.colls = {flow2Receiver, otherVia, flow2Via, otherReceiver};
+    replies = {extension(75), extension(25)};
+    PollSonix(reordered);
+    assert(reordered.out.size() == 2 && reordered.out[0].key == secondKey && reordered.out[1].key == firstKey);
+
+    puts("SONiX driver tests passed (21 legacy receivers, strict LF2-v1, outcomes and physical bindings)");
 }

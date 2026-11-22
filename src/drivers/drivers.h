@@ -3,6 +3,7 @@
 // appends what it finds. A driver claims a device (vendor/product id) once it has handled it so
 // that the generic fallbacks further down the chain do not report it twice.
 #include <set>
+#include <map>
 #include <utility>
 #include <vector>
 
@@ -15,6 +16,9 @@ struct PollContext
     std::set<std::pair<USHORT, USHORT>> claimed;
     std::set<std::wstring> btContainers; // container ids PollBluetooth already reported
     std::vector<DeviceStatus> out;
+    std::set<std::wstring> presentTransports;  // independent of battery-query success
+    bool inventoryComplete = false;
+    std::map<std::wstring, BatteryOutcome> transportOutcomes;  // only query attempts with known outcomes
     // Device keys that already had battery readings in the history when the app started (null in tests and
     // with history recording off). A driver can trust such a device to be real even when it is silent now.
     const std::set<std::wstring>* seenBefore = nullptr;
@@ -26,6 +30,7 @@ struct PollContext
     {
         out.push_back(s);
         if (!out.back().vid) out.back().vid = vid;
+        if (!out.back().pid) out.back().pid = pid;
         Claim(vid, pid);
     }
     // A device key that stays the same when the receiver moves to another USB port (HID paths change

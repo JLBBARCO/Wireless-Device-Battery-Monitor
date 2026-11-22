@@ -11,18 +11,21 @@ the JSON that a YASB `CustomWidget` expects.
 
 ## How it works
 
-The app writes a snapshot to `%LOCALAPPDATA%\WirelessBattery\status.json` after every poll
-(**every 60 seconds**), and deletes it when it quits. The script reads that file when it is fresh
-(less than three minutes old), so YASB does not poll the receivers a second time while the app is
-running.
+The app writes a snapshot to `%LOCALAPPDATA%\WirelessBattery\status.json` after
+every poll (60 seconds by default), and deletes it when it quits. The script
+reads that file when it is fresh (less than three minutes old), so YASB does
+not poll the receivers a second time while the app is running.
 
-When the app is not running, the script runs `WirelessBattery.exe --json`, which polls the devices
-and prints the same document. App versions without `--json` still work: the script falls back to
-parsing `--list`.
+When the app is not running, the script tries `WirelessBattery.exe --json`, then
+falls back to parsing `--list`. The one-shot `--json` command returns an array,
+whereas the resident snapshot is a versioned object. The current script's JSON
+parser expects that object, so the CLI array uses the `--list` fallback. Neither
+CLI mode reads the resident app's historical cache.
 
-The snapshot is written after every poll, so YASB's own interval only limits how quickly it picks
-up a change. Keep `run_interval` at 60 seconds or higher; polling faster does not update the data
-any faster.
+Snapshot generation time and battery receipt time are separate: a fresh file
+can contain an old, explicitly marked last-known reading. YASB's interval
+limits how quickly it picks up changes; match it to the configured polling
+interval. See [last-known battery behavior](last-known-battery.md).
 
 ## Requirements
 
@@ -80,7 +83,9 @@ any faster.
 
 ## The JSON contract
 
-`status.json` and `--json` print the same document:
+The resident `status.json` uses this version-1 envelope. Fields added to each
+device do not change the envelope version. The independent `--json` array
+retains its existing fields and types.
 
 ```json
 {
@@ -95,6 +100,10 @@ any faster.
       "via": "2.4 GHz receiver",
       "percent": 75,
       "live": true,
+      "state": "current",
+      "reason": "none",
+      "last_reading_at": "2026-11-17T21:24:50Z",
+      "reading_age_seconds": 0,
       "charging": false,
       "asleep": false,
       "connected": true,
@@ -107,23 +116,41 @@ any faster.
 }
 ```
 
-| Field | Meaning |
-|---|---|
-| `version` | Document version, currently `1`. |
-| `updated` | UTC time of the poll, ISO 8601. |
-| `source` | `snapshot` for `status.json`, `cli` for `--json`. |
-| `key` | Stable device id (the same value the app uses for hiding and ordering). |
-| `kind` | `headset`, `mouse`, `keyboard`, `gamepad`, `phone` or `other`. |
-| `percent` | The percentage the app would show: the live value, or the last known value while the device sleeps, or `-1` when nothing is known. |
-| `live` | `true` when `percent` came from this poll, `false` when it is the last known value. |
-| `low` | `true` below 15% and not charging. |
-| `levelText` | Coarse level from devices that only report `Low`/`Full`/...; `percent` may be `-1`. |
-| `detail` | Extra breakdown such as `L 80%, R 75%, case 40%`. |
-| `millivolts` | Battery voltage when the device reports it, `0` otherwise. |
-| `asleep`, `charging`, `connected` | Device state as shown in the app. |
+- **`version`**: Document version, currently `1`.
+- **`updated`**: UTC snapshot generation time, ISO 8601; not the battery
+  receipt time.
+- **`source`**: `snapshot` for the resident file. The one-shot array has no
+  envelope.
+- **`key`**: Stable device id (the same value the app uses for hiding and
+  ordering).
+- **`kind`**: `headset`, `mouse`, `keyboard`, `gamepad`, `phone` or `other`.
+- **`percent`**: The displayed current or last-known percentage; `-1` when
+  unknown or disconnected.
+- **`live`**: `true` only for a confirmed reading that is still current;
+  historical values are false.
+- **`state`**: `current`, `last_known`, `unknown`, or `disconnected`.
+- **`reason`**: `none`, `sleep_reported`, `no_response`, `unavailable`,
+  `query_failed`, `invalid_response`, `not_yet_read`, `reading_aged`, or
+  `disconnected`.
+- **`last_reading_at`**: UTC receipt time of the confirmed reading, or `null`
+  when unknown. Snapshot generation does not refresh it.
+- **`reading_age_seconds`**: Age of that reading when the snapshot was
+  generated, or `null` when unknown.
+- **`low`**: `true` at or below the configured low threshold only for current,
+  live, non-charging data.
+- **`levelText`**: Coarse level from devices that only report `Low`/`Full`/...;
+  `percent` may be `-1`.
+- **`detail`**: Extra breakdown such as `L 80%, R 75%, case 40%`.
+- **`millivolts`**: Battery voltage when the device reports it, `0` otherwise.
+- **`asleep`**: `true` only for explicitly reported sleep; no response alone
+  is false.
+- **`charging`**: Current charging state; false for historical data.
+- **`connected`**: Existing driver connection flag, retained for compatibility;
+  not proof that the device is awake.
 
 The device list is already in the app's order, with devices hidden in the app
-(`HiddenDevices`) and, when `HideLastKnownDevices` is on, sleeping devices removed first.
+(`HiddenDevices`) and, when `HideLastKnownDevices` is on, historical devices
+removed first.
 
 ## Choosing what the label shows
 
@@ -143,8 +170,14 @@ $UseHtmlColors = $true
 
 Pass it through `run_cmd`: `... wireless-battery-yasb.ps1 -Mode all`.
 
-Colours are inline HTML in the label: blue for charging (plus a bolt), gray for a sleeping device,
-red at or below `$LowPercent`.
+Colours are inline HTML in the label: blue for charging (plus a bolt), gray
+for reported sleep, red at or below `$LowPercent`.
+The script consumes the existing fields; it does not yet expose the added
+reason and receipt-age fields in its tooltip. Its own low-color rule does not
+check `live`, so a historical low value without reported sleep can still
+appear red in YASB. This is distinct from the app's `low` field, which is false
+for historical data. Check `state` and `reason` directly when diagnosing an
+idle device.
 
 ## Device icons
 

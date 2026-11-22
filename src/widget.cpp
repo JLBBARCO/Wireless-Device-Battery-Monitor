@@ -1599,7 +1599,7 @@ void ShowCard(HWND strip, int item) {
             y += lines.back().m.h + Px(2);
         }
         // chart: the recorded levels of the last 24 hours, then the forecast down to empty (dashed)
-        forecastHours = it.percent > 0 ? it.hoursLeft : -1;
+        forecastHours = it.live && it.percent > 0 ? it.hoursLeft : -1;
         if (g_chartOn && it.percent >= 0 && (!it.trend.empty() || forecastHours > 0)) {
             y += Px(8);
             Mask cap = RenderLine(T(forecastHours > 0 ? L"Last 24 hours and forecast" : L"Last 24 hours"), body);
@@ -1607,7 +1607,7 @@ void ShowCard(HWND strip, int item) {
             y += lines.back().m.h + Px(6);
             chartY = y;
             chart = it.trend;
-            chartNow = it.percent;
+            chartNow = it.live ? it.percent : -1;
             y += Px(56) + Px(4);
             axisLeft = RenderLine(T(L"24h ago"), body);
             axisNow = RenderLine(T(L"Now"), body);
@@ -1682,7 +1682,7 @@ void ShowCard(HWND strip, int item) {
         // the past: recorded readings joined when less than 12 hours apart (a mouse asleep overnight is not a gap), up to now
         std::vector<std::pair<double, double>> pts;
         for (const auto& c : chart) pts.push_back({ (double)c.first, (double)c.second });
-        pts.push_back({ 0.0, (double)chartNow });
+        if (chartNow >= 0) pts.push_back({ 0.0, (double)chartNow });
         for (size_t i = 0; i + 1 < pts.size(); i++) {
             if (pts[i + 1].first - pts[i].first > 12 * 3600) { disc(X(pts[i].first), Y(pts[i].second), 1, 200); continue; }
             line(X(pts[i].first), Y(pts[i].second), X(pts[i + 1].first), Y(pts[i + 1].second), 110, false, false);
@@ -1693,7 +1693,7 @@ void ShowCard(HWND strip, int item) {
             line(X(0), Y(chartNow), X(future), Y(endPct), 90, true, false);
             disc(X(future), Y(endPct), Px(2), 140);
         }
-        disc(X(0), Y(chartNow), Px(2) + 1, 255);  // the current level
+        if (chartNow >= 0) disc(X(0), Y(chartNow), Px(2) + 1, 255);  // a current level only
         // axis labels: "24h ago" at the left, "Now" under the marker, the time to empty at the right
         lines.push_back({ std::move(axisLeft), sub, cx, axisY });
         int nowLabelX = std::max(cx, std::min(nowX - axisNow.w / 2, cx + cw - axisNow.w));

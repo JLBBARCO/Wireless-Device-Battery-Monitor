@@ -44,6 +44,29 @@ std::string Quoted(const std::string& utf8) {
 
 const char* Bool(bool v) { return v ? "true" : "false"; }
 
+battery_state::View StatusView(const StatusDevice& d) {
+    if (d.viewResolved) return d.view;
+    // Compatibility for callers without resident cache state. Synthetic ticks let
+    // the shared policy classify current data, but are never exported as receipt times.
+    DeviceStatus s;
+    s.percent = d.percent;
+    s.connected = d.connected;
+    s.asleep = d.asleep;
+    s.charging = d.charging;
+    s.reportTick = 1;
+    s.outcome = d.asleep ? BatteryOutcome::SleepReported :
+                d.percent > 100 ? BatteryOutcome::InvalidResponse :
+                d.percent < 0 ? BatteryOutcome::NoResponse : BatteryOutcome::Reported;
+    battery_state::Reading r;
+    r.percent = d.lastPct >= 0 ? d.lastPct :
+                d.asleep && d.percent >= 0 && d.percent <= 100 ? d.percent : -1;
+    r.tick = r.percent >= 0 ? 1 : 0;
+    auto view = battery_state::Resolve(s, r, 1, 60000, true);
+    view.readingTick = 0;
+    view.readingUtc.clear();
+    return view;
+}
+
 }  // namespace
 
 const char* KindId(DeviceKind kind) {
@@ -69,21 +92,31 @@ std::string BuildStatusJson(const std::vector<StatusDevice>& devices, const std:
     out += "  \"devices\": [";
     for (size_t i = 0; i < devices.size(); i++) {
         const StatusDevice& d = devices[i];
-        int shown = d.percent >= 0 ? d.percent : d.lastPct;  // what the widget shows: live or last known
+        const auto view = StatusView(d);
+        const int shown = view.state == battery_state::State::Disconnected ? -1 : view.percent;
+        const bool live = d.connected && view.state == battery_state::State::Current &&
+                          view.live && shown >= 0 && shown <= 100;
+        const bool charging = live && view.charging;
         out += i ? ",\n    {" : "\n    {";
         out += "\"key\": " + JsonQuote(d.key);
         out += ", \"name\": " + JsonQuote(d.name);
         out += ", \"kind\": \"" + std::string(KindId(d.kind)) + "\"";
         out += ", \"via\": " + JsonQuote(d.via);
         out += ", \"percent\": " + std::to_string(shown);
-        out += std::string(", \"live\": ") + Bool(d.percent >= 0);
-        out += std::string(", \"charging\": ") + Bool(d.charging);
-        out += std::string(", \"asleep\": ") + Bool(d.asleep);
+        out += std::string(", \"live\": ") + Bool(live);
+        out += std::string(", \"charging\": ") + Bool(charging);
+        out += std::string(", \"asleep\": ") + Bool(view.reason == battery_state::Reason::SleepReported);
         out += std::string(", \"connected\": ") + Bool(d.connected);
-        out += std::string(", \"low\": ") + Bool(!d.charging && shown >= 0 && shown <= lowThreshold);
+        out += std::string(", \"low\": ") + Bool(live && !charging && shown <= lowThreshold);
         out += ", \"levelText\": " + JsonQuote(d.levelText);
         out += ", \"detail\": " + JsonQuote(d.detail);
         out += ", \"millivolts\": " + std::to_string(d.millivolts);
+        out += ", \"state\": " + Quoted(battery_state::StateId(view.state));
+        out += ", \"reason\": " + Quoted(battery_state::ReasonId(view.reason));
+        out += ", \"last_reading_at\": " +
+               (view.readingUtc.empty() ? std::string("null") : Quoted(view.readingUtc));
+        out += ", \"reading_age_seconds\": " +
+               (d.readingAgeSeconds < 0 ? std::string("null") : std::to_string(d.readingAgeSeconds));
         out += "}";
     }
     if (!devices.empty()) out += "\n  ";

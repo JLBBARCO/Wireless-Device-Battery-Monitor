@@ -21,6 +21,9 @@
 // Stock firmware does not supply a battery reading. LF2-v1 requires a complete 32-byte
 // reply, LF2 signature, version 1, additive checksum and explicit available status.
 #include "drivers.h"
+#include "battery_report.h"
+
+#include <map>
 
 namespace {
 
@@ -59,7 +62,9 @@ BYTE Sum(const std::vector<BYTE>& b, size_t from, size_t n) {
 }
 
 // Returns the level byte, or -1 when the dongle did not answer.
-int QueryLevel(HidDev& d, bool flow2 = false, ULONGLONG deadline = 0) {
+int QueryLevel(HidDev& d, bool flow2 = false, ULONGLONG deadline = 0,
+               BatteryOutcome* outcome = nullptr) {
+    if (outcome) *outcome = BatteryOutcome::NoResponse;
     std::vector<BYTE> req(1 + kLen, 0);  // [0] = report id 0
     req[1] = 0x20;
     req[2] = 0x01;
@@ -67,7 +72,11 @@ int QueryLevel(HidDev& d, bool flow2 = false, ULONGLONG deadline = 0) {
     d.Flush();
     const ULONGLONG end = flow2 ? std::min(deadline, GetTickCount64() + 2500) : 0;
     int writeMs = flow2 ? std::min(500, (int)((LONGLONG)end - (LONGLONG)GetTickCount64())) : 500;
-    if (writeMs <= 0 || !d.Write(req, writeMs)) return -1;
+    if (writeMs <= 0) return -1;
+    if (!d.Write(req, writeMs)) {
+        if (outcome) *outcome = BatteryOutcome::QueryFailed;
+        return -1;
+    }
     const ULONGLONG readEnd = flow2 ? end : GetTickCount64() + 500;
     for (;;) {
         int left = (int)((LONGLONG)readEnd - (LONGLONG)GetTickCount64());
@@ -80,10 +89,20 @@ int QueryLevel(HidDev& d, bool flow2 = false, ULONGLONG deadline = 0) {
             // LF2-v1 is deliberately separate from legacy SONiX replies. A stock
             // rejection or an incomplete packet must never become a percentage.
             if (n != static_cast<int>(kLen) || r.size() != kLen || r[5] != 'L' || r[6] != 'F' || r[7] != '2' ||
-                r[8] != 1 || r[31] != Sum(r, 0, 31)) continue;
-            if (r[4] == 0 && r[3] == 0xFF) return -1;
-            if (r[4] != 1 || r[3] > 100) continue;
+                r[8] != 1 || r[31] != Sum(r, 0, 31)) {
+                if (outcome) *outcome = BatteryOutcome::InvalidResponse;
+                continue;
+            }
+            if (r[4] == 0 && r[3] == 0xFF) {
+                if (outcome) *outcome = BatteryOutcome::Unavailable;
+                return -1;
+            }
+            if (r[4] != 1 || r[3] > 100) {
+                if (outcome) *outcome = BatteryOutcome::InvalidResponse;
+                continue;
+            }
         }
+        if (outcome) *outcome = BatteryOutcome::Reported;
         return r[3];
     }
 }
@@ -94,6 +113,27 @@ std::wstring KeyboardName(const HidColl& c) {
     if (name.size() > suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0)
         name.resize(name.size() - suffix.size());
     return name.empty() ? L"Wireless keyboard" : name;
+}
+
+std::map<std::wstring, std::wstring> flow2PublicKeys;
+
+std::wstring Flow2PublicKey(const std::wstring& identity) {
+    const auto found = flow2PublicKeys.find(identity);
+    if (found != flow2PublicKeys.end()) return found->second;
+    const std::wstring base = L"sonix:388D:0002";
+    const std::wstring key = flow2PublicKeys.empty() ? base : base + L"#" + identity;
+    flow2PublicKeys.emplace(identity, key);
+    return key;
+}
+
+int OutcomeStrength(BatteryOutcome outcome) {
+    switch (outcome) {
+        case BatteryOutcome::Reported: return 5;
+        case BatteryOutcome::Unavailable: return 4;
+        case BatteryOutcome::InvalidResponse: return 3;
+        case BatteryOutcome::QueryFailed: return 2;
+        default: return 1;
+    }
 }
 
 void PollFlow2Receiver(PollContext& ctx) {
@@ -113,31 +153,55 @@ void PollFlow2Receiver(PollContext& ctx) {
     });
     if (via.empty()) return;
 
-    DeviceStatus s;
-    s.key = L"sonix:388D:0002";  // keep one tray entry if a battery reading becomes available
-    s.name = L"Lofree Flow 2 receiver";
-    s.kind = DeviceKind::Keyboard;
-    s.via = L"2.4 GHz receiver";
-    s.note = L"Battery unavailable";
-    s.retainLastPercent = false;
-    for (const HidColl* c : via) {
+    std::set<std::wstring> handled;
+    for (const HidColl* physical : receiver) {
+        // A product id alone cannot safely pair the cable/VIA path with a receiver.
+        if (physical->transportId.empty() || !handled.insert(physical->transportId).second) continue;
+        std::vector<const HidColl*> matching;
+        for (const HidColl* c : via)
+            if (c->transportId == physical->transportId) matching.push_back(c);
+        if (matching.empty()) continue;
+        DeviceStatus s;
+        s.key = Flow2PublicKey(physical->transportId);
+        s.name = L"Lofree Flow 2";
+        s.kind = DeviceKind::Keyboard;
+        s.via = L"2.4 GHz receiver";
+        s.note = L"Battery unavailable";
+        s.rawReportPolicy = true;
+        s.transportId = physical->transportId;
+        s.cacheIdentity = L"flow2:" + physical->transportId;
+        s.outcome = BatteryOutcome::NoResponse;
+        s.vid = vid;
+        s.pid = pid;
+        for (const HidColl* c : matching) {
         // LF2-v1 waits for fresh radio telemetry, which may arrive after the usual
         // 500 ms SONiX window. One absolute four-second budget covers both attempts,
         // including writes; unrelated input cannot extend it.
         const ULONGLONG deadline = GetTickCount64() + 4000;
         HidDev d;
-        if (!d.Open(*c)) continue;
-        int level = QueryLevel(d, true, deadline);
-        if (level < 0) level = QueryLevel(d, true, deadline);
-        if (level < 0) continue;
-        s.percent = level;
-        s.connected = true;  // zero is a valid received LF2 measurement
-        s.note.clear();
-        break;
+            if (!d.Open(*c)) {
+                if (OutcomeStrength(s.outcome) < OutcomeStrength(BatteryOutcome::QueryFailed))
+                    s.outcome = BatteryOutcome::QueryFailed;
+                continue;
+            }
+            int level = -1;
+            for (int attempt = 0; attempt < 2 && level < 0; ++attempt) {
+                BatteryOutcome outcome;
+                level = QueryLevel(d, true, deadline, &outcome);
+                if (OutcomeStrength(outcome) > OutcomeStrength(s.outcome)) s.outcome = outcome;
+            }
+            if (level < 0) continue;
+            s.percent = level;
+            s.connected = true;  // zero is a valid received LF2 measurement
+            s.outcome = BatteryOutcome::Reported;
+            StampBatteryReport(s);
+            s.note.clear();
+            break;
+        }
+        // Presence-backed retention is handled independently of legacy grace time.
+        s.graceSec = 0;
+        ctx.Add(s, vid, pid);
     }
-    // No grace period: an unavailable response must clear a previous reading.
-    s.graceSec = 0;
-    ctx.Add(s, vid, pid);
 }
 
 }  // namespace

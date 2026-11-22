@@ -34,7 +34,7 @@ build/app_res.o: res/app.rc res/app.manifest res/app.ico res/app_light.ico res/f
 clean:
 	rm -rf build BatteryHub.exe
 
-test: test-update-core test-update-win test-update-signature test-sonix
+test: test-update-core test-update-win test-update-signature test-sonix test-last-known
 	@mkdir -p build
 	$(CXX) -std=c++17 -O2 -Wall tests/device_aliases_test.cpp -o build/device_aliases_test.exe
 	./build/device_aliases_test.exe
@@ -178,6 +178,15 @@ test-sonix:
 	$(CXX) $(CXXFLAGS) tests/sonix_driver_test.cpp -o build/sonix_driver_test.exe
 	./build/sonix_driver_test.exe
 
+test-last-known:
+	@mkdir -p build
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror tests/battery_state_test.cpp -o build/battery_state_test.exe
+	./build/battery_state_test.exe
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror tests/hid_inventory_test.cpp -o build/hid_inventory_test.exe
+	./build/hid_inventory_test.exe
+	$(CXX) -std=c++17 -O2 -Wall -Wextra -Werror tests/logitech_idle_test.cpp -o build/logitech_idle_test.exe
+	./build/logitech_idle_test.exe
+
 test-update-core:
 	@mkdir -p build
 	$(CXX) -std=c++17 -O2 -Wall tests/update_core_test.cpp src/update_core.cpp -o build/update_core_test.exe
@@ -196,4 +205,4 @@ test-update-win: build/version.h build/app_res.o
 
 FORCE:
 
-.PHONY: clean test test-sonix test-update-core test-update-win test-update-signature FORCE
+.PHONY: clean test test-sonix test-last-known test-update-core test-update-win test-update-signature FORCE

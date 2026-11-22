@@ -77,6 +77,97 @@ void TestUnknownAndLow() {
     assert(Has(BuildStatusJson({low}, "cli", 15, "x"), "\"charging\": true"));
 }
 
+void TestResolvedHistoricalZero() {
+    StatusDevice d = Make(DeviceKind::Keyboard, L"Lofree Flow 2", 99, 88);
+    d.charging = true;  // stale raw flags must not override resolved historical presentation
+    d.asleep = true;
+    d.viewResolved = true;
+    d.view.state = battery_state::State::LastKnown;
+    d.view.reason = battery_state::Reason::NoResponse;
+    d.view.percent = 0;
+    d.view.readingTick = 1000;
+    d.view.readingUtc = "2026-11-22T09:00:00Z";
+    d.readingAgeSeconds = 1080;
+    const auto first = BuildStatusJson({d}, "snapshot", 15, "2026-11-22T09:18:00Z");
+    const auto later = BuildStatusJson({d}, "snapshot", 15, "2026-11-22T09:19:00Z");
+    for (const auto* json : {&first, &later}) {
+        assert(Has(*json, "\"percent\": 0"));
+        assert(Has(*json, "\"live\": false"));
+        assert(Has(*json, "\"charging\": false"));
+        assert(Has(*json, "\"low\": false"));
+        assert(Has(*json, "\"asleep\": false"));
+        assert(Has(*json, "\"state\": \"last_known\""));
+        assert(Has(*json, "\"reason\": \"no_response\""));
+        assert(Has(*json, "\"last_reading_at\": \"2026-11-22T09:00:00Z\""));
+        assert(Has(*json, "\"reading_age_seconds\": 1080"));
+    }
+    assert(first != later);  // only the separately supplied snapshot time changed
+    assert(d.readingAgeSeconds == 1080 && d.view.readingTick == 1000);
+}
+
+void TestResolvedReasons() {
+    using battery_state::Reason;
+    const std::pair<Reason, const char*> cases[] = {
+        {Reason::None, "none"}, {Reason::SleepReported, "sleep_reported"},
+        {Reason::NoResponse, "no_response"}, {Reason::Unavailable, "unavailable"},
+        {Reason::QueryFailed, "query_failed"}, {Reason::InvalidResponse, "invalid_response"},
+        {Reason::NotYetRead, "not_yet_read"}, {Reason::ReadingAged, "reading_aged"},
+        {Reason::Disconnected, "disconnected"}
+    };
+    for (auto [reason, text] : cases) {
+        StatusDevice d = Make(DeviceKind::Mouse, L"Mouse", -1, 5);
+        d.viewResolved = true;
+        d.view.state = battery_state::State::LastKnown;
+        d.view.percent = 5;
+        d.view.reason = reason;
+        const auto json = BuildStatusJson({d}, "snapshot", 15, "x");
+        assert(Has(json, std::string("\"reason\": \"") + text + "\""));
+        assert(Has(json, std::string("\"asleep\": ") + (reason == Reason::SleepReported ? "true" : "false")));
+        assert(Has(json, "\"live\": false") && Has(json, "\"low\": false"));
+        assert(Has(json, "\"last_reading_at\": null"));
+        assert(Has(json, "\"reading_age_seconds\": null"));
+    }
+}
+
+void TestResolvedCurrentAndOffline() {
+    StatusDevice current = Make(DeviceKind::Mouse, L"Mouse", -1, 50);
+    current.viewResolved = true;
+    current.view.state = battery_state::State::Current;
+    current.view.reason = battery_state::Reason::None;
+    current.view.percent = 0;
+    current.view.live = true;
+    current.view.readingUtc = "2026-11-22T09:00:00Z";
+    current.readingAgeSeconds = 0;
+    auto json = BuildStatusJson({current}, "snapshot", 15, "x");
+    assert(Has(json, "\"percent\": 0") && Has(json, "\"live\": true"));
+    assert(Has(json, "\"low\": true") && Has(json, "\"reading_age_seconds\": 0"));
+
+    current.connected = false;
+    current.charging = true;
+    current.view.state = battery_state::State::Disconnected;
+    current.view.reason = battery_state::Reason::Disconnected;
+    current.view.percent = 90;  // defensive offline rendering must hide even an old percentage
+    current.view.charging = true;
+    json = BuildStatusJson({current}, "snapshot", 15, "x");
+    assert(Has(json, "\"percent\": -1") && Has(json, "\"live\": false"));
+    assert(Has(json, "\"connected\": false") && Has(json, "\"charging\": false"));
+    assert(Has(json, "\"low\": false") && Has(json, "\"state\": \"disconnected\""));
+}
+
+void TestLegacyDoesNotInventTimeOrFreshness() {
+    auto d = Make(DeviceKind::Mouse, L"Mouse", 5);
+    d.asleep = true;
+    d.charging = true;
+    auto json = BuildStatusJson({d}, "snapshot", 15, "x");
+    assert(Has(json, "\"percent\": 5") && Has(json, "\"state\": \"last_known\""));
+    assert(Has(json, "\"live\": false") && Has(json, "\"charging\": false"));
+    assert(Has(json, "\"low\": false") && Has(json, "\"reason\": \"sleep_reported\""));
+    assert(Has(json, "\"last_reading_at\": null") && Has(json, "\"reading_age_seconds\": null"));
+    d.connected = false;
+    json = BuildStatusJson({d}, "snapshot", 15, "x");
+    assert(Has(json, "\"percent\": -1") && Has(json, "\"reason\": \"disconnected\""));
+}
+
 void TestEscaping() {
     StatusDevice d = Make(DeviceKind::Other, L"Mouse \"Pro\"\\x\n\ttab \x01", 50);
     std::string json = BuildStatusJson({d}, "cli", 15, "x");
@@ -113,6 +204,10 @@ int main() {
     TestDevice();
     TestAsleepKeepsLastKnown();
     TestUnknownAndLow();
+    TestResolvedHistoricalZero();
+    TestResolvedReasons();
+    TestResolvedCurrentAndOffline();
+    TestLegacyDoesNotInventTimeOrFreshness();
     TestEscaping();
     TestUtf8();
     TestTwoDevices();

@@ -3,6 +3,7 @@
 #include "devices.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cstdio>
 #include <cwchar>
 
@@ -38,11 +39,21 @@ std::vector<std::pair<USHORT, USHORT>> IgnoredDevices() {
 
 }  // namespace
 
-std::vector<DeviceStatus> PollAllDevices() {
+DevicePollSnapshot PollDevicesSnapshot() {
+    static std::atomic<std::uint64_t> nextSequence{0};
+    DevicePollSnapshot snapshot;
+    snapshot.sequence = ++nextSequence;
+    snapshot.capturedTick = GetTickCount64();
+    HidInventory inventory = EnumHidInventory();
+    snapshot.presentTransports = std::move(inventory.presentTransports);
+    snapshot.inventoryComplete = inventory.complete;
     PollContext ctx;
     ctx.seenBefore = &battery_history::KeysAtStartup();
-    ctx.colls = EnumHid();
+    ctx.colls = std::move(inventory.colls);
+    ctx.presentTransports = snapshot.presentTransports;
+    ctx.inventoryComplete = snapshot.inventoryComplete;
     auto ignored = IgnoredDevices();
+    snapshot.ignoredProducts.insert(ignored.begin(), ignored.end());
     if (!ignored.empty())
         ctx.colls.erase(std::remove_if(ctx.colls.begin(), ctx.colls.end(), [&](const HidColl& c) {
                             return std::find(ignored.begin(), ignored.end(), std::make_pair(c.vid, c.pid)) != ignored.end();
@@ -161,7 +172,13 @@ std::vector<DeviceStatus> PollAllDevices() {
     PollArmorX(ctx);  // claims 045E:0B12 so the Xbox fallback skips the dongle's fake "Full" (PR #145)
     PollXInput(ctx);
     PollUnsupported(ctx);  // menu only: "No battery info"
-    return ctx.out;
+    snapshot.transportOutcomes = std::move(ctx.transportOutcomes);
+    snapshot.devices = std::move(ctx.out);
+    return snapshot;
+}
+
+std::vector<DeviceStatus> PollAllDevices() {
+    return PollDevicesSnapshot().devices;
 }
 
 std::wstring DumpHidCollections() {

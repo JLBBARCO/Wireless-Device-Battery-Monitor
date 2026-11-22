@@ -552,9 +552,9 @@ void Initialize(bool demo) {
 
 const std::set<std::wstring>& KeysAtStartup() { return g_keysAtStartup; }
 
-void Observe(const std::wstring& key, int percent, bool charging) {
+void Observe(const std::wstring& key, int percent, bool charging, long long receivedAt) {
     if (g_demo) return;
-    Sample s{key, UtcNow(), percent, charging};
+    Sample s{key, receivedAt > 0 ? receivedAt : UtcNow(), percent, charging};
     if (g_store.Record(s)) {
         Append(s);
         if (g_view && key == g_key) InvalidateRect(g_view, nullptr, FALSE);

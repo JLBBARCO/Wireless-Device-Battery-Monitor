@@ -11,7 +11,7 @@ void Initialize(bool demo);
 // never changed afterwards, so the poll thread may read it.
 const std::set<std::wstring>& KeysAtStartup();
 // Stores only valid, connected and awake readings (the caller enforces connection state).
-void Observe(const std::wstring& key, int percent, bool charging);
+void Observe(const std::wstring& key, int percent, bool charging, long long receivedAt = 0);
 // The same conservative time-to-empty the viewer shows, in hours, or -1 when there is none (charging, too
 // few or stale readings); RemainingText formats it ("~3 d 4 h") or returns an empty string.
 double HoursRemaining(const std::wstring& key);
