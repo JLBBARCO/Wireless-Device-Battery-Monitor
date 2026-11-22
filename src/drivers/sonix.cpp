@@ -16,7 +16,16 @@
 // From github.com/donglover69/sonix-keyboard-studio (README, "2.4G dongles"); the AK820 Pro receiver
 // 0C45:FDFD and the echo match from github.com/deddroid/ak820-rs (src/device.rs, src/protocol.rs) and
 // github.com/usharik/ak820-studio (Sources/AK820Kit/Keyboard.swift).
+// Lofree Flow2 84 (OE927) on its 388D:0002 receiver (PR #4162): only with the experimental custom
+// firmware LF2-v1 from github.com/softerist/lofree; stock firmware has no battery reading. LF2-v1
+// answers the same 20 01 request with a full 32-byte reply:
+//   [20 01 00 level status 'L' 'F' '2' 01 ... sum]  status 1 = level valid (0% is a real reading),
+//   status 0 with level FF = no reading yet; byte 31 = byte sum of bytes 0..30.
+// The receiver is told apart from the cable (same USB id) by its extra interface-0 collection
+// (usage page 1, usage 0, 64-byte reports, no feature report).
 #include "drivers.h"
+
+#include <map>
 
 namespace {
 
@@ -39,7 +48,6 @@ const Dongle kDongles[] = {
     { 0x342D, 0xE51A, -1 },  // NUT65 (PR #2608, hardware untested)
     { 0x342D, 0xE487, -1 },  // RK 2.4G Dongle (PR #2609, hardware untested)
     { 0x342D, 0xE537, -1 },  // WEIKAV MAX102 (PR #2610, hardware untested)
-    { 0x388D, 0x0002, -1 },  // Lofree Flow2 (PR #2612, hardware untested)
     { 0x19F5, 0x3245, -1 },  // NuPhy Air75V2 (PR #2613, hardware untested)
     { 0x362D, 0xD028, -1 },  // SKN Qinglong (PR #2614, hardware untested)
     { 0x362D, 0xD030, -1 },  // Lemokey Link (PR #2616, hardware untested)
@@ -95,6 +103,80 @@ int QueryLevel(HidDev& d) {
     }
 }
 
+enum class Flow2 { Level, NoReading, Stock, Silent };
+
+// One LF2-v1 query. A stock-firmware echo (no LF2 signature) ends it at once.
+Flow2 QueryFlow2(HidDev& d, int& level) {
+    std::vector<BYTE> req(1 + kLen, 0);
+    req[1] = 0x20;
+    req[2] = 0x01;
+    req[kLen] = Sum(req, 1, kLen - 1);
+    d.Flush();
+    if (!d.Write(req)) return Flow2::Silent;
+    // LF2-v1 waits for fresh radio telemetry, which can take longer than the usual 500 ms.
+    const ULONGLONG end = GetTickCount64() + 2000;
+    for (;;) {
+        int left = (int)((LONGLONG)end - (LONGLONG)GetTickCount64());
+        if (left <= 0) return Flow2::Silent;
+        std::vector<BYTE> r;
+        int n = d.Read(r, left);
+        if (n < 0) return Flow2::Silent;
+        if (n < 4 || r[0] != 0x20 || r[1] != 0x01 || r[2] != 0x00) continue;
+        if (n != (int)kLen || r[5] != 'L' || r[6] != 'F' || r[7] != '2' || r[8] != 1) return Flow2::Stock;
+        if (r[31] != Sum(r, 0, 31)) continue;
+        if (r[4] == 0 && r[3] == 0xFF) return Flow2::NoReading;
+        if (r[4] != 1 || r[3] > 100) continue;
+        level = r[3];
+        return Flow2::Level;
+    }
+}
+
+// Receivers that answered like stock firmware are not asked again until they are replugged.
+std::map<std::wstring, bool> g_flow2Stock;
+
+void PollFlow2Receiver(PollContext& ctx) {
+    constexpr USHORT vid = 0x388D, pid = 0x0002;
+    std::map<std::wstring, bool> seen;
+    if (ctx.IsClaimed(vid, pid)) return;
+    bool receiver = !ctx.Find(vid, pid, [](const HidColl& c) {
+        return c.iface == 0 && c.page() == 0x0001 && c.usage() == 0 && c.inLen() == 64 && c.outLen() == 64 &&
+               c.featLen() == 0;
+    }).empty();
+    if (!receiver) {
+        g_flow2Stock.clear();
+        return;
+    }
+    for (const HidColl* c : ctx.Find(vid, pid, [](const HidColl& c) {
+             return c.iface == 2 && c.page() == 0xFF60 && c.usage() == 0x0061 && c.inLen() == kLen + 1 &&
+                    c.outLen() == kLen + 1;
+         })) {
+        if (g_flow2Stock.count(c->path)) {
+            seen[c->path] = true;
+            continue;
+        }
+        HidDev d;
+        if (!d.Open(*c)) continue;
+        int level = -1;
+        Flow2 got = QueryFlow2(d, level);
+        if (got == Flow2::Silent) got = QueryFlow2(d, level);  // the first request after idle can be lost
+        if (got == Flow2::Stock) {
+            seen[c->path] = true;
+            continue;
+        }
+        if (got == Flow2::Silent) continue;
+        DeviceStatus s;
+        s.key = L"sonix:388D:0002";
+        s.name = L"Lofree Flow 2";
+        s.kind = DeviceKind::Keyboard;
+        s.via = L"2.4 GHz receiver";
+        s.graceSec = 1800;  // keep the last reading while the keyboard sleeps
+        if (got == Flow2::Level) s.percent = level;
+        ctx.Add(s, vid, pid);
+        break;
+    }
+    for (auto& [path, stock] : seen) g_flow2Stock[path] = stock;
+}
+
 std::wstring KeyboardName(const HidColl& c) {
     std::wstring name = HidProduct(c);
     const std::wstring suffix = L" 2.4G";
@@ -130,4 +212,5 @@ void PollSonix(PollContext& ctx) {
             break;
         }
     }
+    PollFlow2Receiver(ctx);
 }
