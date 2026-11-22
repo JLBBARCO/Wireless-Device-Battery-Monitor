@@ -23,6 +23,8 @@
 #include <vector>
 
 #include "device_aliases.h"
+#include "drivers/hidpp_events.h"
+#include "hid_listener.h"
 #include "alert_rules.h"
 #include "devices.h"
 #include "battery_history.h"
@@ -46,6 +48,7 @@ namespace {
 constexpr UINT WM_TRAY = WM_APP + 1;
 constexpr UINT WM_RESULTS = WM_APP + 2;
 constexpr UINT WM_WIDGET_CLICK = WM_APP + 3;
+constexpr UINT WM_DEVICE_EVENT = WM_APP + 4;  // lParam: ms to wait before polling (PR #535)
 constexpr UINT_PTR TIMER_DEBOUNCE = 1;
 constexpr UINT_PTR TIMER_WIDGET = 2;
 constexpr UINT_PTR TIMER_ALERT_ICON = 3;
@@ -87,6 +90,13 @@ const wchar_t* kSettingsKey = L"Software\\WirelessBattery";
 HINSTANCE g_inst;
 HWND g_hwnd;
 HANDLE g_refreshEvt, g_stopEvt, g_worker;
+// Push-event emitters (PR #535): a Logitech mouse switched on behind a receiver that stays plugged in
+// produces no Windows event, so without them it would only show up at the next poll.
+std::vector<std::unique_ptr<IEventSource>> g_sources;
+struct WindowRefreshSink final : IRefreshSink {
+    // Called on a listener thread: hand it to the window, which debounces it like a USB change.
+    void RequestRefresh(std::uint32_t delayMs) override { PostMessageW(g_hwnd, WM_DEVICE_EVENT, 0, (LPARAM)delayMs); }
+} g_refreshSink;
 UINT g_taskbarCreatedMsg;
 bool g_lightTaskbar;
 bool g_myFinder = false;  // widget mode on MyDockFinder's bar instead of the taskbar (PR #251)
@@ -2016,6 +2026,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 if (handle && wp == DBT_DEVICEREMOVECOMPLETE)
                     DropBluetoothRadioWatch(reinterpret_cast<const DEV_BROADCAST_HANDLE*>(lp)->dbch_handle);
                 RefreshSoon(2500);
+                for (auto& src : g_sources) src->DevicesChanged();
             } else if (handle && (wp == DBT_DEVICEQUERYREMOVE || wp == DBT_DEVICEREMOVEPENDING)) {
                 // Let the radio go: an open handle would block its removal.
                 DropBluetoothRadioWatch(reinterpret_cast<const DEV_BROADCAST_HANDLE*>(lp)->dbch_handle);
@@ -2044,6 +2055,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 g_awakeBeforeSleep = AwakeDevices();
             } else if (wp == PBT_APMRESUMEAUTOMATIC) {
                 RefreshAfterWake(5000);
+                for (auto& src : g_sources) src->DevicesChanged();  // handles go stale over sleep
             } else if (wp == PBT_POWERSETTINGCHANGE && lp) {
                 // Modern Standby may not report a suspend / resume: the display turning off and on stands in.
                 auto* ps = reinterpret_cast<const POWERBROADCAST_SETTING*>(lp);
@@ -2055,6 +2067,9 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
                 }
             }
             return TRUE;
+        case WM_DEVICE_EVENT:
+            RefreshSoon((UINT)lp);
+            return 0;
         case WM_TIMER:
             if (wp == TIMER_DEBOUNCE) { KillTimer(h, TIMER_DEBOUNCE); SetEvent(g_refreshEvt); }
             if (wp == TIMER_RESUME) {
@@ -2083,6 +2098,7 @@ LRESULT CALLBACK WndProc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
             KillTimer(h, TIMER_ALERT_ICON);
             if (g_alertIconAdded) { TrayDelete(ALERT_ICON_ID); g_alertIconAdded = false; }
             widget::Destroy();
+            for (auto& src : g_sources) src->Stop();
             SetEvent(g_stopEvt);
             if (g_worker) WaitForSingleObject(g_worker, 5000);
             ShutdownDevices();
@@ -2210,7 +2226,67 @@ int ListJson() {
 
 }  // namespace
 
+// `--events [seconds]` prints the push events the listeners see (default 60 s), so a contributor can
+// check that a device sends them before relying on them (PR #535).
+int EventsToConsole(const wchar_t* args) {
+    HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (!out || out == INVALID_HANDLE_VALUE) {
+        if (AttachConsole(ATTACH_PARENT_PROCESS)) out = CreateFileW(L"CONOUT$", GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    }
+    auto write = [out](const std::wstring& s) {
+        std::wstring line = s + L"\n";
+        int n = WideCharToMultiByte(CP_UTF8, 0, line.c_str(), (int)line.size(), nullptr, 0, nullptr, nullptr);
+        std::string u(n, 0);
+        WideCharToMultiByte(CP_UTF8, 0, line.c_str(), (int)line.size(), u.data(), n, nullptr, nullptr);
+        DWORD w;
+        WriteFile(out, u.data(), (DWORD)u.size(), &w, nullptr);
+    };
+
+    // Logitech receivers send connection events only while their "wireless" notification flag is set.
+    // Read it (a register read, like the battery queries; never written) so the output says why nothing arrives.
+    for (const HidColl& c : EnumHid()) {
+        if (c.vid != 0x046D || c.page() != 0xFF00 || c.usage() != 0x0001 || c.outLen() != 7) continue;
+        HidDev d;
+        if (!d.Open(c)) continue;
+        BYTE req[7];
+        hidpp::NotificationFlagsRequest(req);
+        d.Flush();
+        std::wstring state = L"no answer (not a receiver?)";
+        if (d.Write(std::vector<BYTE>(req, req + 7))) {
+            std::vector<BYTE> r;
+            for (ULONGLONG end = GetTickCount64() + 500; GetTickCount64() < end;) {
+                std::uint32_t flags = 0;
+                if (d.Read(r, 50) > 0 && hidpp::ParseNotificationFlags(r.data(), r.size(), flags)) {
+                    state = (flags & hidpp::kWirelessNotifications)
+                                ? L"on"
+                                : L"OFF (connection events need G HUB, Options+ or Solaar to switch them on)";
+                    break;
+                }
+            }
+        }
+        write(L"receiver " + Hex4(c.vid) + L":" + Hex4(c.pid) + L" wireless notifications: " + state);
+    }
+
+    // The same listener the app runs, with a sink that prints instead of polling.
+    struct ConsoleSink final : IRefreshSink {
+        std::function<void(const std::wstring&)> write;
+        void RequestRefresh(std::uint32_t delayMs) override {
+            write(L"  => refresh requested (in " + std::to_wstring(delayMs) + L" ms)");
+        }
+    } sink;
+    sink.write = write;
+    HidEventListener listener(HidEventDecoders(), write);
+    if (!listener.Start(sink)) return 1;
+    int seconds = (int)wcstol(wcsstr(args, L"--events") + 8, nullptr, 10);
+    if (seconds <= 0) seconds = 60;
+    write(L"listening for " + std::to_wstring(seconds) + L" s: switch a wireless device off and on...");
+    Sleep((DWORD)seconds * 1000);
+    listener.Stop();
+    return 0;
+}
+
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
+    if (cmdLine && wcsstr(cmdLine, L"--events")) return EventsToConsole(cmdLine);
     if (cmdLine && wcsstr(cmdLine, L"--json")) return ListJson();
     if (cmdLine && wcsstr(cmdLine, L"--help")) {
         MessageBoxW(nullptr,
@@ -2218,6 +2294,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
                     L"--list   Print devices and battery levels\n"
                     L"--json   Print a JSON array of devices and battery levels\n"
                     L"--dump   Print every HID collection and device\n"
+                    L"--events Print push events from wireless receivers (60 s)\n"
                     L"--report Open the \"Request support for a device\" window\n"
                     L"--demo   Show sample devices\n"
                     L"--trace  Log every poll to %TEMP%\\wirelessbattery-trace.log\n"
@@ -2344,6 +2421,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR cmdLine, int) {
     UpdatePlaceholder();  // something to click on until the first poll finishes
     SetTimer(g_hwnd, TIMER_WIDGET, 1000, nullptr);
     g_worker = CreateThread(nullptr, 0, Worker, nullptr, 0, nullptr);
+    if (!g_demo) {
+        g_sources.push_back(std::make_unique<HidEventListener>(HidEventDecoders()));
+        for (auto& src : g_sources) src->Start(g_refreshSink);
+    }
 
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {

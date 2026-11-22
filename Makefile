@@ -166,6 +166,8 @@ test: test-update-core test-update-win test-update-signature
 	./build/labels_test.exe
 	$(CXX) $(CXXFLAGS) tests/brands_test.cpp src/brands.cpp -o build/brands_test.exe
 	./build/brands_test.exe
+	$(CXX) $(CXXFLAGS) tests/hid_events_test.cpp src/drivers/event_decoders.cpp src/drivers/logitech_events.cpp -o build/hid_events_test.exe
+	./build/hid_events_test.exe
 	$(CXX) -std=c++17 -O2 -Wall tests/xbox_bluetooth_identity_test.cpp -o build/xbox_bluetooth_identity_test.exe
 	./build/xbox_bluetooth_identity_test.exe
 	$(CXX) $(CXXFLAGS) tests/jabra_driver_test.cpp src/drivers/jabra.cpp -o build/jabra_driver_test.exe
