@@ -73,7 +73,7 @@ void PollSinowealthReceiver(PollContext& ctx);  // Redragon M602-KS receiver (25
 void PollDarkrim(PollContext& ctx);   // DARKRIM SHADOW receiver (3654:6901)
 void PollGlorious(PollContext& ctx);  // also Hitscan
 void PollAula(PollContext& ctx);      // AULA F75 / F87 Pro / F99 / HERO 68 Air keyboards, SC580 mouse (before Kysona)
-void PollEweadn(PollContext& ctx);    // EWEADN S7 / S9 mice (372E:103D receiver, 372E:1027 S9 Ultra cable)
+void PollEweadn(PollContext& ctx);    // EWEADN S7 / S9 mice (receiver 372E:1026/1033/103D/1055, cable 372E:1027/1029/105E/108D)
 void PollAulaMouse(PollContext& ctx); // AULA X9 Ultra on the shared AULA-8K receiver
 void PollAulaHeadset(PollContext& ctx); // AULA A7Pro over its 2.4 GHz receiver
 void PollDareu(PollContext& ctx);     // DAREU EM901X receiver / cable, A84 keyboard, A980 Pro, Sharkoon SGM50W (split feature/input collections)

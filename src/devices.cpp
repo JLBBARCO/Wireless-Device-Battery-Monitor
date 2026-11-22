@@ -53,7 +53,7 @@ std::vector<DeviceStatus> PollAllDevices() {
     PollAula(ctx);       // before Kysona (shares the 3554 vendor id) and SONiX (shares 05AC:024F)
     PollAulaMouse(ctx);
     PollAulaHeadset(ctx);
-    PollEweadn(ctx);     // BeiYing mice: EWEADN S7 / S9 on 372E:103D / 1027, RK M3 on 1019 / 102A (AULA keeps 106C)
+    PollEweadn(ctx);     // BeiYing mice: EWEADN S9 on 372E:1026/1033/103D/1055 receivers or 1027/1029/105E/108D cables, RK M3 on 1019 / 102A (AULA keeps 106C)
     PollDareu(ctx);
     PollPiao(ctx);       // IPI PIAO mouse on 372E:1014 receiver (and wired 1015/1028/1056)
     PollZenith(ctx);
