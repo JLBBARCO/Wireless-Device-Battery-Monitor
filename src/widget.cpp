@@ -867,14 +867,20 @@ std::vector<Piece> Layout(int barW, int barH, int& width, int& height) {
     if (ringIcons) DeleteObject(ringIcons);
 
     height = barH;
-    const int rowGap = Px(2), barRoom = Px(5);  // barRoom: space for a brand level bar under the text
+    const int rowGap = Px(2);
+    const int barRoom = Px(3) + std::max(2, Px(2));  // space for a brand level bar under the text
     int iconH = 0, textH = 0;
+    bool hasBar = false;
     for (const Slot& s : slots) {
         iconH = std::max(iconH, out[s.icon].m.h);
         textH = std::max(textH, out[s.label].m.h);
+        hasBar |= out[s.label].barPct >= 0;
     }
     bool vertical = barH > barW;  // per bar: a secondary taskbar can be docked differently from the main one
-    bool stacked = !vertical && g_stacked && !slots.empty() && barH >= iconH + rowGap + textH + barRoom + Px(6);
+    const int stackedBarRoom = hasBar ? barRoom : 0;
+    const int stackedPadding = Px(6);  // Minimum space above and below the stack.
+    bool stacked = !vertical && g_stacked && !slots.empty() &&
+                   barH >= iconH + rowGap + textH + stackedBarRoom + 2 * stackedPadding;
     if (vertical) {
         // One block per device, centred in the bar's width: icon, then the percentage (and bolt) under it.
         // Spaced like the notification area's own icons, so the column reads as part of it.
@@ -911,7 +917,7 @@ std::vector<Piece> Layout(int barW, int barH, int& width, int& height) {
     }
     if (stacked) {
         // Icon on top (bolt to its right), percentage centred under it; the pair centred in the bar's height.
-        int top = (barH - (iconH + rowGap + textH + barRoom)) / 2;
+        int top = (barH - (iconH + rowGap + textH + stackedBarRoom)) / 2;
         int x = Px(8);
         for (const Slot& s : slots) {
             Piece& ic = out[s.icon];
