@@ -52,6 +52,7 @@ const Dongle kDongles[] = {
     { 0xFFFE, 0x0047, -1 },  // Vortex NS75 (PR #4121, hardware untested)
     { 0x373B, 0x1053, -1 },  // MAD60 (PR #4122, hardware untested)
     { 0x6D66, 0x8888, -1 },  // Zoom 75 (PR #4123, hardware untested)
+    { 0x373B, 0x1151, -1 },  // ATK A98 Pro (PR #4124, hardware untested)
 };
 
 const size_t kLen = 32;  // payload bytes after the report id; the last one is the checksum
