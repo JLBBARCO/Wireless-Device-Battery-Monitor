@@ -1,0 +1,29 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+
+PackageIdentifier: krisgfx9.BatteryHub
+PackageVersion: 1.1.0
+PackageLocale: en-US
+Publisher: BatteryHub contributors
+PublisherUrl: https://github.com/krisgfx9
+PublisherSupportUrl: https://github.com/krisgfx9/Wireless-Device-Battery-Monitor/issues
+Author: krisgfx9
+PackageName: BatteryHub
+PackageUrl: https://github.com/krisgfx9/Wireless-Device-Battery-Monitor
+License: GPL-3.0
+LicenseUrl: https://raw.githubusercontent.com/krisgfx9/Wireless-Device-Battery-Monitor/main/LICENSE
+ShortDescription: Battery levels of your wireless mouse, headset, keyboard and controller on the Windows taskbar.
+Description: |-
+  Battery levels of your wireless mouse, headset, keyboard and controller, right on the Windows taskbar.
+  Plain C++/Win32 app using ~2 MB of RAM, supporting Logitech, Razer, SteelSeries, Corsair, HyperX, and many other brands.
+Moniker: batteryhub
+Tags:
+  - battery
+  - taskbar
+  - bluetooth
+  - wireless
+  - headset
+  - mouse
+  - keyboard
+ReleaseNotesUrl: https://github.com/krisgfx9/Wireless-Device-Battery-Monitor/releases/tag/v1.1.0
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

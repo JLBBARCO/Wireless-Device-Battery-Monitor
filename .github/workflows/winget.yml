@@ -1,0 +1,20 @@
+name: Publish to Winget
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    # Trava obrigatória para evitar execuções e falhas em forks de terceiros
+    if: github.repository == 'krisgfx9/Wireless-Device-Battery-Monitor'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Submit to winget-pkgs
+        uses: vedantmgoyal9/winget-releaser@main
+        with:
+          identifier: krisgfx9.BatteryHub
+          version: ${{ github.event.release.tag_name }}
+          installers-regex: '\.exe$'
+          token: ${{ secrets.WINGET_TOKEN }}
+          # Nota: 'fork-user' é intencionalmente omitido para auto-detecção via token

@@ -1,0 +1,24 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+
+PackageIdentifier: krisgfx9.BatteryHub
+PackageVersion: 1.1.0
+InstallerType: inno
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+UpgradeBehavior: install
+ReleaseDate: 2026-11-23
+Installers:
+  - Architecture: x64
+    InstallerType: inno
+    InstallerUrl: https://github.com/krisgfx9/Wireless-Device-Battery-Monitor/releases/download/v1.1.0/BatteryHub-Setup-1.1.0.exe
+    InstallerSha256: 0000000000000000000000000000000000000000000000000000000000000000
+    AppsAndFeaturesEntries:
+      - DisplayName: BatteryHub
+        Publisher: BatteryHub contributors
+        DisplayVersion: 1.1.0
+        ProductCode: '{7E0B5C2A-3F4D-4C8E-9B61-2D5A8F1C4E93}_is1'
+ManifestType: installer
+ManifestVersion: 1.6.0
