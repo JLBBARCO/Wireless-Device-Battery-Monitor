@@ -1,57 +1,66 @@
-# Integração WinGet (Windows Package Manager)
+# WinGet (Windows Package Manager) Integration
 
-Este diretório contém os manifestos e orientações para a publicação e manutenção do **BatteryHub** no repositório comunitário oficial da Microsoft (`microsoft/winget-pkgs`).
+This directory contains the manifests and documentation for publishing and maintaining **BatteryHub** in Microsoft's official Windows Package Manager community repository (`microsoft/winget-pkgs`).
 
 ---
 
-## 1. Identificadores e Mapeamento ARP (Add/Remove Programs)
+## 1. Package Metadata & Windows Registry (ARP) Mapping
 
-Para que o WinGet reconheça instalações existentes e permita o upgrade via `winget upgrade` sem criar duplicatas ou conflitos, os metadados do instalador Inno Setup (`installer/BatteryHub.iss`) e do Registro do Windows foram mapeados exatamente da seguinte forma:
+To ensure WinGet correlates existing installations (made via the standard installer or updated via the built-in auto-updater) without version conflicts or duplicate entries, the package manifests mirror the values written by the Inno Setup installer (`installer/BatteryHub.iss`):
 
-* **PackageIdentifier:** `krisgfx9.BatteryHub`
+* **PackageIdentifier:** `krisgfx9.WirelessDeviceBatteryMonitor`
+* **PackageName:** `BatteryHub`
+* **Publisher:** `BatteryHub contributors`
 * **InstallerType:** `inno`
 * **ProductCode (Inno AppId + `_is1`):** `{7E0B5C2A-3F4D-4C8E-9B61-2D5A8F1C4E93}_is1`
-* **DisplayName:** `BatteryHub` (estático, sem versão no nome)
-* **Publisher:** `BatteryHub contributors`
-* **DisplayVersion:** Definido dinamicamente pelo instalador na compilação (`AppVersion`)
-* **Chave no Registro:**
-  * Por usuário: `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7E0B5C2A-3F4D-4C8E-9B61-2D5A8F1C4E93}_is1`
-  * Todos os usuários: `HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7E0B5C2A-3F4D-4C8E-9B61-2D5A8F1C4E93}_is1`
+* **DisplayName:** `BatteryHub` (static; does not include version strings)
+* **DisplayVersion:** Injected during build time (`AppVersion`)
+* **Registry Uninstall Keys:**
+  * Per-user (default): `HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7E0B5C2A-3F4D-4C8E-9B61-2D5A8F1C4E93}_is1`
+  * All-users: `HKLM\Software\Microsoft\Windows\CurrentVersion\Uninstall\{7E0B5C2A-3F4D-4C8E-9B61-2D5A8F1C4E93}_is1`
 
-O auto-updater interno do aplicativo (`src/update_apply.cpp`) executa silenciosamente o próprio instalador Inno Setup oficial (`BatteryHub-Setup-<versao>.exe /WBUPDATE=1 ...`), garantindo que a entrada `DisplayVersion` no Registro do Windows seja sempre atualizada automaticamente a cada atualização interna.
+### Built-in Auto-Updater Compatibility
+The internal auto-updater (`src/update_apply.cpp`) does not perform raw binary replacement; it silently executes the official Inno Setup installer (`BatteryHub-Setup-<version>.exe /WBUPDATE=1 ...`). As a result, the `DisplayVersion` and ARP registry entries are automatically kept in sync whenever an internal update is applied, keeping `winget list` and `winget upgrade` completely synchronized.
 
 ---
 
-## 2. Publicação Inicial no `microsoft/winget-pkgs` (Passo Único)
+## 2. One-Time Initial Onboarding to `microsoft/winget-pkgs`
 
-A automação via GitHub Actions (`winget-releaser`) requer que o pacote **já exista** no catálogo do WinGet. Para a primeira versão:
+The automated GitHub Action (`winget-releaser`) only *updates* existing packages in `microsoft/winget-pkgs`. The package must be registered manually once:
 
-1. Faça um fork de [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs).
-2. Copie a pasta de manifestos deste diretório (`winget/manifests/k/krisgfx9/BatteryHub/<versao>`) para o seu fork, atualizando o `InstallerSha256` e a URL de release para o binário `.exe` publicado.
-   * Alternativamente, utilize a ferramenta oficial:
+1. Fork [microsoft/winget-pkgs](https://github.com/microsoft/winget-pkgs).
+2. Copy the manifest folder `winget/manifests/k/krisgfx9/WirelessDeviceBatteryMonitor/<version>` into your fork under `manifests/k/krisgfx9/WirelessDeviceBatteryMonitor/<version>`.
+3. Set the release URL and update `InstallerSha256` to match the published `BatteryHub-Setup-<version>.exe`.
+   * Alternatively, use the official tool:
      ```powershell
-     wingetcreate new https://github.com/krisgfx9/Wireless-Device-Battery-Monitor/releases/download/v<versao>/BatteryHub-Setup-<versao>.exe
+     wingetcreate new https://github.com/krisgfx9/Wireless-Device-Battery-Monitor/releases/download/v<version>/BatteryHub-Setup-<version>.exe
      ```
-3. Valide os manifestos localmente:
+4. Validate the manifests locally:
    ```powershell
    winget settings --enable LocalManifestFiles
-   winget validate --manifest .\winget\manifests\k\krisgfx9\BatteryHub\<versao>
+   winget validate --manifest .\winget\manifests\k\krisgfx9\WirelessDeviceBatteryMonitor\<version>
    ```
-4. Abra o Pull Request no repositório `microsoft/winget-pkgs`. Após a aprovação da Microsoft, o pacote estará disponível para instalação via `winget install krisgfx9.BatteryHub`.
+5. Submit the pull request to `microsoft/winget-pkgs`. Once approved and merged by Microsoft, the package is live and installable via:
+   ```cmd
+   winget install krisgfx9.WirelessDeviceBatteryMonitor
+   ```
 
 ---
 
-## 3. Automação Contínua (`.github/workflows/winget.yml`)
+## 3. Automated Release Publishing (`.github/workflows/winget.yml`)
 
-Após a aceitação do pacote no catálogo oficial, toda nova versão publicada em uma **GitHub Release** do repositório upstream será automaticamente enviada ao `microsoft/winget-pkgs`.
+Once the initial package is merged in `microsoft/winget-pkgs`, future updates are published automatically upon each GitHub Release.
 
-### Requisitos para o mantenedor:
-1. Criar um fork pessoal de `microsoft/winget-pkgs` na conta do mantenedor.
-2. Gerar um GitHub Personal Access Token (Classic PAT) com permissão `public_repo`.
-3. Adicionar o token nos segredos do repositório (`Settings > Secrets and variables > Actions`) com o nome:
+### Workflow Configuration
+* **Workflow file:** `.github/workflows/winget.yml`
+* **Trigger:** `release: types: [published]`
+* **Repository guard:** `if: github.repository == 'krisgfx9/Wireless-Device-Battery-Monitor'` (prevents accidental runs on third-party forks)
+* **Installer filter:** `installers-regex: '\.exe$'` (targets only the setup installer `BatteryHub-Setup-*.exe`, ignoring the portable `.zip` and source archives)
+* **Action:** `vedantmgoyal9/winget-releaser@main`
+
+### Repository Secret Setup
+For the upstream repository maintainer:
+1. Fork `microsoft/winget-pkgs` to your personal GitHub account.
+2. Generate a GitHub Personal Access Token (Classic PAT) with the `public_repo` scope.
+3. In repository **Settings → Secrets and variables → Actions**, add the token as:
    * **`WINGET_TOKEN`**
-
-O workflow `.github/workflows/winget.yml` está configurado para:
-* Executar apenas em releases publicadas no repositório oficial (`krisgfx9/Wireless-Device-Battery-Monitor`).
-* Filtrar unicamente os instaladores executáveis (`.exe`).
-* Omitir `fork-user` para autodetectar a conta pelo dono do `WINGET_TOKEN`.

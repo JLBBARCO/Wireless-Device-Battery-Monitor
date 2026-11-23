@@ -15,7 +15,11 @@ Battery levels of your wireless mouse, headset, keyboard and controller, right o
 
 ![BatteryHub on the taskbar](docs/screenshot.png)
 
-> **Just want it working?** Download **[BatteryHub-Setup](https://github.com/krisgfx9/Wireless-Device-Battery-Monitor/releases/latest)** from the latest release. Use the per-user installation for setup without administrator rights; see the [installation notes](#install) for unsigned-app warnings and the all-users option.
+> **Just want it working?** Install via **WinGet**:
+> ```cmd
+> winget install krisgfx9.WirelessDeviceBatteryMonitor
+> ```
+> Or download **[BatteryHub-Setup](https://github.com/krisgfx9/Wireless-Device-Battery-Monitor/releases/latest)** from the latest release. Use the per-user installation for setup without administrator rights; see the [installation notes](#install) for unsigned-app warnings and the all-users option.
 >
 > **Experienced users** can grab the portable zip, use the [command-line options](#command-line), or [build it from source](#build) with `make` or `build.bat`.
 >
@@ -275,6 +279,21 @@ These reports cover the listed connection modes and behaviors; battery confirmat
 ## Install
 
 [![Latest version](https://img.shields.io/github/v/release/krisgfx9/Wireless-Device-Battery-Monitor?label=latest%20version&style=for-the-badge)](https://github.com/krisgfx9/Wireless-Device-Battery-Monitor/releases/latest)
+
+### Via Windows Package Manager (WinGet)
+
+Install the latest official release directly from your terminal:
+
+```cmd
+winget install krisgfx9.WirelessDeviceBatteryMonitor
+```
+
+To update an existing installation later:
+```cmd
+winget upgrade krisgfx9.WirelessDeviceBatteryMonitor
+```
+
+### Manual Installation
 
 1. Download **`BatteryHub-Setup-<version>.exe`** from the [latest release](https://github.com/krisgfx9/Wireless-Device-Battery-Monitor/releases/latest).
 2. Run the installer. The default per-user installation needs no administrator rights.

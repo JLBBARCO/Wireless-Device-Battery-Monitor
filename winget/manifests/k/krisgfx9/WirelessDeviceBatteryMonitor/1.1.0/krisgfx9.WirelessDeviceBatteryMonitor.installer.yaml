@@ -1,6 +1,6 @@
 # yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
 
-PackageIdentifier: krisgfx9.BatteryHub
+PackageIdentifier: krisgfx9.WirelessDeviceBatteryMonitor
 PackageVersion: 1.1.0
 InstallerType: inno
 Scope: user

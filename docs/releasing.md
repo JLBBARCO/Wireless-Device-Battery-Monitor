@@ -37,6 +37,15 @@ powershell -ExecutionPolicy Bypass -File scripts\new-release-key.ps1
 Only sign a list for a release you published yourself. The signature says "these exact files are the
 release", so signing is the step where a malicious upload would be caught.
 
+## WinGet package publishing
+
+When a GitHub release is published, the automated workflow [`.github/workflows/winget.yml`](../.github/workflows/winget.yml) submits updated package manifests to [`microsoft/winget-pkgs`](https://github.com/microsoft/winget-pkgs) via the `vedantmgoyal9/winget-releaser` action:
+
+- **Package Identifier:** `krisgfx9.WirelessDeviceBatteryMonitor`
+- **Installer Asset:** Matched via `installers-regex: '\.exe$'` (`BatteryHub-Setup-<version>.exe`).
+- **Prerequisites:** A personal access token with `public_repo` scope must be set in repository secrets as `WINGET_TOKEN`.
+- **Reference:** See [`winget/README.md`](../winget/README.md) for ARP registry mapping details, initial package registration instructions, and architecture notes.
+
 ## Changing the key
 
 Run `new-release-key.ps1` with a new `-KeyFile`: it adds the new public key next to the old one in
